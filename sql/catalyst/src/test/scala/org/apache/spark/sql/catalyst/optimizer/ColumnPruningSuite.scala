@@ -273,8 +273,46 @@ class ColumnPruningSuite extends PlanTest {
       aliases => Inline($"${aliases(1)}".as("c.h")),
       aliases => Seq($"c".getField("d").as(aliases(0)), $"c".getField("h").as(aliases(1))),
       Seq(2),
-      Seq("h1", "h2")
-    )
+      Seq("h1", "h2"))
+  }
+
+  test("Nested column pruning for multi-level array") {
+    val structType = StructType.fromDDL(
+      "d double, e array<string>, f double, g double, " +
+        "h array<struct<h1: int, " +
+        "h2: array<struct<i1: int, i2: int, i3: array<struct<j1: int, j2: int>>>>>>")
+    val input = LocalRelation($"a".int, $"b".int, $"c".struct(structType))
+    val generatorOutputNames = Seq("explode2")
+    val generatorOutputs = generatorOutputNames.map(UnresolvedAttribute(_))
+    val selectedExprs = Seq(UnresolvedAttribute("a"), $"explode3.j1")
+    val query =
+      input
+        .generate(Explode($"c".getField("h")), outputNames = Seq("explode1"))
+        .generate(Explode($"explode1".getField("h2")), outputNames = Seq("explode2"))
+        .generate(Explode($"explode2".getField("i3")), outputNames = Seq("explode3"))
+        .select(selectedExprs: _*)
+        .where($"explode3.j1".isNotNull)
+        .analyze
+    val optimized = Optimize.execute(query)
+    //    val aliases = NestedColumnAliasingSuite.collectGeneratedAliases(optimized)
+    //    val aliasedExprs : Seq[String] => Seq[Expression] =
+    //      aliases => Seq($"c".getField("d").as(aliases(0)), $"c".getField("e").as(aliases(1)))
+    //    val replacedGenerator: Seq[String] => Generator =
+    //      aliases => Explode($"${aliases(1)}".as("c.e"))
+    //    val selectedFields = UnresolvedAttribute("a") +: aliasedExprs(aliases)
+    //    val finalSelectedExprs = Seq(UnresolvedAttribute("a"), $"${aliases(0)}".as("c.d")) ++
+    //      generatorOutputs
+    //    val unrequiredChildIndex = Seq(2)
+    //    val correctAnswer =
+    //      input
+    //        .select(selectedFields: _*)
+    //        .generate(replacedGenerator(aliases),
+    //          unrequiredChildIndex = unrequiredChildIndex,
+    //          outputNames = generatorOutputNames)
+    //        .where($"explode".isNotNull)
+    //        .select(finalSelectedExprs: _*)
+    //        .analyze
+    //    comparePlans(optimized, correctAnswer)
   }
 
 
