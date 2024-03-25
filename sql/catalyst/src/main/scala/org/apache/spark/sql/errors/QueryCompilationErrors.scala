@@ -1200,6 +1200,15 @@ private[sql] object QueryCompilationErrors extends QueryErrorsBase with Compilat
       messageParameters = Map.empty)
   }
 
+  def dataTypeUnsupportedByExtractNestedValueError(
+                                                    child: DataType,
+                                                    level: Int): Throwable = {
+    new AnalysisException(
+      errorClass = "INVALID_EXTRACT_FIELD",
+      messageParameters =
+        Map("field" -> s"level->$level", "expr" -> child.toString))
+  }
+
   def dataTypeUnsupportedByExtractValueError(
       dataType: DataType, extraction: Expression, child: Expression): Throwable = {
     dataType match {

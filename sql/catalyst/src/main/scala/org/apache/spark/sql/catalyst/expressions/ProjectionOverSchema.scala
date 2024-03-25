@@ -61,6 +61,28 @@ case class ProjectionOverSchema(schema: StructType, output: AttributeSet) {
               s"unmatched child schema for GetArrayStructFields: ${projSchema.toString}"
             )
         }
+      case a: GetNestedArrayStructFields =>
+        getProjection(a.child).map(p => (p, p.dataType)).map {
+          case (projection, t @ ArrayType(ArrayType(_, _), _)) =>
+            // For case-sensitivity aware field resolution, we should take `ordinal` which
+            // points to correct struct field, because `ExtractValue` actually does column
+            // name resolving correctly.
+            val projSchema = GetNestedArrayStructFields.getStruct(t, a.level)
+            val selectedField = GetNestedArrayStructFields
+              .getStruct(a.child.dataType, a.level)
+              .fields(a.ordinal)
+            val prunedField = projSchema(selectedField.name)
+            GetNestedArrayStructFields(projection,
+              prunedField.copy(name = a.field.name),
+              projSchema.fieldIndex(selectedField.name),
+              projSchema.size,
+              a.level,
+              a.containsNull)
+          case (_, projSchema) =>
+            throw new IllegalStateException(
+              s"unmatched child schema for GetArrayStructFields: ${projSchema.toString}"
+            )
+        }
       case MapKeys(child) =>
         getProjection(child).map { projection => MapKeys(projection) }
       case MapValues(child) =>
