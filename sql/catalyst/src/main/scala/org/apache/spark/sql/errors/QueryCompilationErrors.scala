@@ -770,6 +770,15 @@ private[sql] object QueryCompilationErrors extends QueryErrorsBase {
     new AnalysisException("The second argument should be a double literal.")
   }
 
+  def dataTypeUnsupportedByExtractNestedValueError(
+                                                    child: DataType,
+                                                    level: Int): Throwable = {
+    new AnalysisException(
+      errorClass = "INVALID_EXTRACT_FIELD",
+      messageParameters =
+        Map("field" -> s"level->$level", "expr" -> child.toString))
+  }
+
   def dataTypeUnsupportedByExtractValueError(
       dataType: DataType, extraction: Expression, child: Expression): Throwable = {
     val errorMsg = dataType match {
