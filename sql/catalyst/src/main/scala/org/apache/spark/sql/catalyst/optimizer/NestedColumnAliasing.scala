@@ -19,6 +19,7 @@ package org.apache.spark.sql.catalyst.optimizer
 
 import scala.collection.mutable
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate.AggregateFunction
 import org.apache.spark.sql.catalyst.plans.logical._
@@ -138,6 +139,7 @@ object NestedColumnAliasing {
           val fieldName = ev match {
             case g: GetStructField => g.extractFieldName
             case g: GetArrayStructFields => g.field.name
+            case g: GetNestedArrayStructFields => g.field.name
           }
           ev -> Alias(ev, s"_extract_$fieldName")()
         }
@@ -230,6 +232,10 @@ object NestedColumnAliasing {
                               _: MapKeys |
                               _: ExtractValue |
                               _: AttributeReference, _, _, _, _) => Seq(e)
+    case GetNestedArrayStructFields(_: MapValues |
+                                    _: MapKeys |
+                                    _: ExtractValue |
+                                    _: AttributeReference, _, _, _, _, _) => Seq(e)
     case es if es.children.nonEmpty => es.children.flatMap(collectRootReferenceAndExtractValue)
     case _ => Seq.empty
   }
@@ -317,7 +323,7 @@ object NestedColumnAliasing {
 /**
  * This prunes unnecessary nested columns from [[Generate]], or [[Project]] -> [[Generate]]
  */
-object GeneratorNestedColumnAliasing {
+object GeneratorNestedColumnAliasing extends Logging {
   def unapply(plan: LogicalPlan): Option[LogicalPlan] = plan match {
     // Either `nestedPruningOnExpressions` or `nestedSchemaPruningEnabled` is enabled, we
     // need to prune nested columns through Project and under Generate. The difference is
@@ -375,7 +381,8 @@ object GeneratorNestedColumnAliasing {
       // We cannot push through if the child of generator is `MapType`.
       g.generator.children.head.dataType match {
         case _: MapType => return Some(pushedThrough)
-        case ArrayType(_: ArrayType, _) => return Some(pushedThrough)
+        case a @ ArrayType(_: ArrayType, _) =>
+          log.info(s"processing ${g.generator.children.head}.${g.generator.children.head}: ${a}")
         case _ =>
       }
 
@@ -393,6 +400,12 @@ object GeneratorNestedColumnAliasing {
           case gsf: GetStructField =>
             val child_res = helper(gsf.child)
             (child_res._1.map(p => gsf.withNewChildren(Seq(p))), child_res._2)
+          case ga: GetArrayStructFields =>
+            val child_res = helper(ga.child)
+            (child_res._1.map(p => ga.withNewChildren(Seq(p))), child_res._2)
+          case gna: GetNestedArrayStructFields =>
+            val child_res = helper(gna.child)
+            (child_res._1.map(p => gna.withNewChildren(Seq(p))), child_res._2)
           case other =>
             val child_res = other.children.map(helper)
             val child_res_combined = (child_res.flatMap(_._1), child_res.flatMap(_._2))
@@ -449,6 +462,14 @@ object GeneratorNestedColumnAliasing {
                 updatedGenerate.output
                   .find(a => attrExprIdsOnGenerator.contains(a.exprId))
                   .getOrElse(f)
+              case g: GetArrayStructFields if nestedFieldsOnGenerator.contains(g) =>
+                updatedGenerate.output
+                  .find(a => attrExprIdsOnGenerator.contains(a.exprId))
+                  .getOrElse(g)
+              case g: GetNestedArrayStructFields if nestedFieldsOnGenerator.contains(g) =>
+                updatedGenerate.output
+                .find(a => attrExprIdsOnGenerator.contains(a.exprId))
+                .getOrElse(g)
             }
             Some(updatedProject)
 
@@ -464,9 +485,9 @@ object GeneratorNestedColumnAliasing {
       // only use part of nested column of it. A required child output means it is referred
       // as a whole or partially by higher projection, pruning it here will cause unresolved
       // query plan.
-      NestedColumnAliasing.rewritePlanIfSubsetFieldsUsed(
+      val out = NestedColumnAliasing.rewritePlanIfSubsetFieldsUsed(
         plan, g.generator.children, g.requiredChildOutput)
-
+      out
     case _ =>
       None
   }
@@ -485,6 +506,15 @@ object GeneratorNestedColumnAliasing {
         val fieldName = g.extractFieldName
         val newChild = replaceGenerator(generator, g.child)
         ExtractValue(newChild, Literal(fieldName), SQLConf.get.resolver)
+      case ga: GetArrayStructFields =>
+        val fieldName = ga.field.name
+        val newChild = replaceGenerator(generator, ga.child)
+        ExtractValue.nestedArrayStructFields(newChild, Literal(fieldName), SQLConf.get.resolver, 2)
+      case ga: GetNestedArrayStructFields =>
+        val fieldName = ga.field.name
+        val newChild = replaceGenerator(generator, ga.child)
+        ExtractValue.nestedArrayStructFields(
+          newChild, Literal(fieldName), SQLConf.get.resolver, ga.level + 1)
       case other =>
         other.mapChildren(replaceGenerator(generator, _))
     }

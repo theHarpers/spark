@@ -96,6 +96,25 @@ object SelectedField {
         }
         val newField = StructField(field.name, newFieldDataType, field.nullable)
         selectField(child, Option(ArrayType(struct(newField), containsNull)))
+      case GetNestedArrayStructFields(child, _, ordinal, _, level, containsNull) =>
+        val field = GetNestedArrayStructFields.getStruct(child.dataType, level).fields(ordinal)
+        val newFieldDataType: DataType = dataTypeOpt match {
+          case Some(a : ArrayType) =>
+            // GetArrayStructFields is part of a chain of extractors and its result is pruned
+            // by a parent expression. In this case need to use the parent element type.
+            GetNestedArrayStructFields.getTarget(a, level)
+          case Some(x) =>
+            // This should not happen.
+            throw QueryCompilationErrors.dataTypeUnsupportedByClassError(x, "GetArrayStructFields")
+          case None =>
+            field.dataType
+        }
+        val newField = struct(StructField(field.name, newFieldDataType, field.nullable))
+        var selectedType : ArrayType = ArrayType(newField, containsNull)
+        for (_ <- 1 until level) {
+            selectedType = ArrayType(selectedType, containsNull)
+        }
+        selectField(child, Option(selectedType))
       case GetMapValue(child, key) if key.foldable =>
         // GetMapValue does not select a field from a struct (i.e. prune the struct) so it can't be
         // the top-level extractor. However it can be part of an extractor chain.

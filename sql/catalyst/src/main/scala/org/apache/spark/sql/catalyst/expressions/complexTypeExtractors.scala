@@ -72,6 +72,25 @@ object ExtractValue {
     }
   }
 
+  def nestedArrayStructFields(
+      child: Expression,
+      extraction: Expression,
+      resolver: Resolver,
+      level: Int): Expression = {
+    (child.dataType, extraction) match {
+      case (_ @ ArrayType(ArrayType(_, _), containsNull), NonNullLiteral(v, StringType)) =>
+        val fields: Array[StructField] =
+          GetNestedArrayStructFields.getStruct(child.dataType, level).fields
+        val fieldName = v.toString
+        val ordinal = findField(fields, fieldName, resolver)
+        GetNestedArrayStructFields(child, fields(ordinal).copy(name = fieldName),
+          ordinal, fields.length, level, containsNull)
+      case (otherType, _) =>
+        throw QueryCompilationErrors.dataTypeUnsupportedByExtractValueError(
+          otherType, extraction, child)
+    }
+  }
+
   /**
    * Find the ordinal of StructField, report error if no desired field or over one
    * desired fields are found.
@@ -149,6 +168,116 @@ case class GetStructField(child: Expression, ordinal: Int, name: Option[String] 
     copy(child = newChild)
 
   def metadata: Metadata = childSchema(ordinal).metadata
+}
+case class GetNestedArrayStructFields(
+    child: Expression,
+    field: StructField,
+    ordinal: Int,
+    numFields: Int,
+    level: Int,
+    containsNull: Boolean)
+    extends UnaryExpression
+    with ExtractValue {
+
+  override def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
+    val genericArrayClass = classOf[GenericArrayData].getName
+    val arrayClass = classOf[ArrayData].getName
+    nullSafeCodeGen(ctx, ev, eval => {
+      val row = ctx.freshName("row")
+      val helper = ctx.freshName("helper")
+      val func = ctx.addNewFunction(helper,
+        s"""
+           |$genericArrayClass $helper($arrayClass input, int lvl) {
+           |  if (input == null) return null;
+           |  Object[] res = new Object[input.numElements()];
+           |  for(int i = 0; i < input.numElements(); i++) {
+           |    if (lvl == 1) {
+           |      if (input.isNullAt(i)) {
+           |        res[i] = null;
+           |      } else {
+           |        final InternalRow $row = input.getStruct(i, $numFields);
+           |        if ($row.isNullAt(${ordinal})) {
+           |          res[i] = null;
+           |        } else {
+           |          res[i] = ${CodeGenerator.getValue(row, field.dataType, ordinal.toString)};
+           |        }
+           |      }
+           |    } else {
+           |      final $arrayClass items = input.getArray(i);
+           |      res[i] = $helper(items, lvl -1);
+           |    }
+           |  }
+           |  return new $genericArrayClass(res);
+           |}""".stripMargin)
+
+      s"""
+        ${ev.value} = $func($eval, $level);
+      """
+    })
+  }
+
+  private def nullSafeEval(input: ArrayData, level: Int): ArrayData = {
+    val length = input.numElements()
+    val result = new Array[Any](length)
+    var i = 0
+    while (i < length) {
+      if (input.isNullAt(i)) {
+        result(i) = null
+      } else if (level > 1) {
+        nullSafeEval(input.getArray(i), level - 1)
+        i += 1
+      } else {
+        val row = input.getStruct(i, numFields)
+        if (row.isNullAt(ordinal)) {
+          result(i) = null
+        } else {
+          result(i) = row.get(ordinal, field.dataType)
+        }
+      }
+      i += 1
+    }
+    new GenericArrayData(result)
+  }
+  protected override def nullSafeEval(input: Any): Any = {
+    nullSafeEval(input.asInstanceOf[ArrayData], level)
+  }
+
+  override def dataType: DataType = {
+    var t: DataType = field.dataType
+    for (_ <- 1 to level) {
+      t = ArrayType(t, containsNull)
+    }
+    t
+  }
+
+  override def toString: String = s"$child.${field.name}"
+  override protected def withNewChildInternal(newChild: Expression): Expression = {
+    copy(child = newChild)
+  }
+}
+object GetNestedArrayStructFields{
+  def getStruct(child: DataType, level: Int): StructType = {
+    val target: DataType = getTarget(child, level)
+    if (!target.isInstanceOf[StructType]) {
+      throw QueryCompilationErrors.dataTypeUnsupportedByExtractNestedValueError(
+        child,
+        level)
+    }
+    target.asInstanceOf[StructType]
+  }
+
+  def getTarget(child: DataType, level: Int): DataType = {
+    var target: DataType = child
+    for (_ <- 1 to level) {
+      if (!target.isInstanceOf[ArrayType]) {
+        throw QueryCompilationErrors.dataTypeUnsupportedByExtractNestedValueError(
+          child,
+          level)
+      }
+      target = target.asInstanceOf[ArrayType].elementType
+    }
+    target
+  }
 }
 
 /**
