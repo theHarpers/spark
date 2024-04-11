@@ -371,6 +371,43 @@ class ColumnPruningSuite extends PlanTest {
     }
   }
 
+  test("Multiple Nested column pruning for Generate 4") {
+    withSQLConf(SQLConf.NESTED_SCHEMA_PRUNING_THROUGH_FILTER_GENERATE.key -> "true") {
+      val structType = StructType.fromDDL("d double, e array<string>, f double, g double, " +
+        "h array<struct<h1: int, h2: double, h3 int, h4 struct<h41 int, h42 int>, " +
+        "h5 array<struct<h51: int, h52: int, h53: int," +
+        " h54 array<struct<h541 int, h542 int, h543 int, h544 struct<" +
+        " h5441 int, h5442 int>>>>>>>")
+      val structType2 = StructType.fromDDL("z1 int, z2 int," +
+        "z3 struct<z31 int, z32 int>")
+      val input = LocalRelation($"a".int, $"b".int, $"c".struct(structType),
+      $"d".array(structType2))
+      val selectedExprs = Seq( $"explode2.h51", $"explode3.z1")
+      val query =
+        input
+          .generate(Explode($"c.h"), outputNames = Seq("explode"))
+          .generate(Explode($"explode.h5"), outputNames = Seq("explode2"))
+          .generate(Explode($"d"), outputNames = Seq("explode3"))
+          .select(selectedExprs: _*)
+          .where($"explode3.z3.z31".isNotNull)
+          .analyze
+      val optimized = Optimize.execute(query)
+      val finalSelectedExprs = Seq(UnresolvedAttribute("a")) ++
+        Seq($"explode.`0`".as("h1"), $"explode.`1`".as("h41"), $"b")
+      val correctAnswer =
+        input
+          .select($"a", $"c.h.h1".as("_extract_h1"),
+            $"c.h.h4.h41".as("_extract_h41"),
+            $"b")
+          .generate(Explode(ArraysZip(Seq($"_extract_h1", $"_extract_h41"), Seq("0", "1"))),
+            unrequiredChildIndex = Seq(1, 2),
+            outputNames = Seq("explode"))
+          .select(finalSelectedExprs: _*)
+          .analyze
+//      comparePlans(optimized, correctAnswer)
+    }
+  }
+
   test("Column pruning for Project on Sort") {
     val input = LocalRelation($"a".int, $"b".string, $"c".double)
 
