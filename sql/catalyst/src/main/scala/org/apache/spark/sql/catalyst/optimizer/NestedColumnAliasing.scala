@@ -118,7 +118,6 @@ object NestedColumnAliasing {
       // it may cause infinite loop during the [[PushDownPredicates]] rule.
       g.generator.children.head.dataType match {
         case _: MapType => return None
-        case ArrayType(_: ArrayType, _) => return None
         case _ =>
       }
 
@@ -480,7 +479,13 @@ object GeneratorNestedColumnAliasing extends Logging {
             assert(updatedGeneratorOutput.length == rewrittenG.generatorOutput.length,
               "Updated generator output must have the same length " +
                 "with original generator output.")
-            val updatedGenerate = rewrittenG.copy(generatorOutput = updatedGeneratorOutput)
+            val unrequired = g.generator.references -- p.references
+            val unrequiredIndices = rewrittenG.output
+              .zipWithIndex.filter(t => unrequired.contains(t._1))
+              .map(_._2)
+            val updatedGenerate = rewrittenG.copy(
+              generatorOutput = updatedGeneratorOutput,
+              unrequiredChildIndex = unrequiredIndices)
 
             // Replace nested column accessor with generator output.
             val attrExprIdsOnGenerator = attrToExtractValuesOnGenerator.keys.map(_.exprId).toSet
@@ -493,8 +498,20 @@ object GeneratorNestedColumnAliasing extends Logging {
                     Literal(nestedFieldsOnGenerator(f)),
                     SQLConf.get.resolver))
                   .getOrElse(f)
-              case o: Expression =>
-                o
+              case f2: GetArrayStructFields if nestedFieldsOnGenerator.contains(f2) =>
+                updatedGenerate.output
+                  .find(a => attrExprIdsOnGenerator.contains(a.exprId))
+                  .map(x => ExtractValue(x,
+                    Literal(nestedFieldsOnGenerator(f2)),
+                    SQLConf.get.resolver))
+                  .getOrElse(f2)
+              case f3: GetNestedArrayStructFields if nestedFieldsOnGenerator.contains(f3) =>
+                updatedGenerate.output
+                  .find(a => attrExprIdsOnGenerator.contains(a.exprId))
+                  .map(x => ExtractValue(x,
+                    Literal(nestedFieldsOnGenerator(f3)),
+                    SQLConf.get.resolver))
+                  .getOrElse(f3)
             }
             Some(updatedProject)
           case other =>
@@ -527,7 +544,13 @@ object GeneratorNestedColumnAliasing extends Logging {
             assert(updatedGeneratorOutput.length == rewrittenG.generatorOutput.length,
               "Updated generator output must have the same length " +
                 "with original generator output.")
-            val updatedGenerate = rewrittenG.copy(generatorOutput = updatedGeneratorOutput)
+            val unrequired = g.generator.references -- p.references
+            val unrequiredIndices = rewrittenG.output
+              .zipWithIndex.filter(t => unrequired.contains(t._1))
+              .map(_._2)
+            val updatedGenerate = rewrittenG.copy(
+              generatorOutput = updatedGeneratorOutput,
+              unrequiredChildIndex = unrequiredIndices)
 
             // Replace nested column accessor with generator output.
             val attrExprIdsOnGenerator = attrToExtractValuesOnGenerator.keys.map(_.exprId).toSet
