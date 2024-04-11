@@ -545,10 +545,15 @@ object RemoveRedundantAliases extends Rule[LogicalPlan] {
       case _ =>
         // Remove redundant aliases in the subtree(s).
         val currentNextAttrPairs = mutable.Buffer.empty[(Attribute, Attribute)]
-        val newNode = plan.mapChildren { child =>
-          val newChild = removeRedundantAliases(child, excluded)
-          currentNextAttrPairs ++= createAttributeMapping(child, newChild)
-          newChild
+        val newNode = plan match {
+          case p: Generate =>
+            val newChild = removeRedundantAliases(p.child, excluded)
+            currentNextAttrPairs ++= createAttributeMapping(p.child, newChild)
+            p.copy(child = newChild, unrequiredChildIndex = p.unrequiredChildIndex)
+          case other => other.mapChildren { child =>
+            val newChild = removeRedundantAliases(child, excluded)
+            currentNextAttrPairs ++= createAttributeMapping(child, newChild)
+            newChild
         }
 
         // Create the attribute mapping. Note that the currentNextAttrPairs can contain duplicate

@@ -157,8 +157,20 @@ case class Generate(
 
   def output: Seq[Attribute] = requiredChildOutput ++ qualifiedGeneratorOutput
 
-  override protected def withNewChildInternal(newChild: LogicalPlan): Generate =
-    copy(child = newChild)
+  lazy val unrequiredChildOutput: Seq[Attribute] = {
+    val unrequiredSet = unrequiredChildIndex.toSet
+    child.output.zipWithIndex.filter(t => unrequiredSet.contains(t._2)).map(_._1)
+  }
+
+  override protected def withNewChildInternal(newChild: LogicalPlan): Generate = {
+    if (!child.resolved || unrequiredChildIndex.isEmpty) {
+      copy(child = newChild)
+    } else {
+      val newOut = AttributeMap[Int](newChild.output.zipWithIndex.map(x => x._1 -> x._2))
+      val unRequired = unrequiredChildOutput.flatMap(x => newOut.get(x))
+      copy(child = newChild, unrequiredChildIndex = unRequired)
+    }
+  }
 }
 
 case class Filter(condition: Expression, child: LogicalPlan)
