@@ -120,19 +120,9 @@ object NestedColumnAliasing {
         case ArrayType(_: ArrayType, _) => return None
         case _ =>
       }
-      // As purnning multiple nested fields is not supported right now,
-      // this projection should not be pushed through filter as it won't
-      // take any effect, and will cause infinite loop during the [[PushDownPredicates]] rule.
-      // TODO(SPARK-34956): support multiple fields.
 
-      val attrToExtractValues = getAttributeToExtractValues(
-        projectList ++ Seq(condition), Seq())
-      if (!attrToExtractValues.exists(p => p._2.size > 1)) {
-        rewritePlanIfSubsetFieldsUsed(
-          plan, projectList ++ Seq(condition), Seq())
-      } else {
-        None
-      }
+      rewritePlanIfSubsetFieldsUsed(
+        plan, projectList ++ Seq(condition), Seq())
 
     case Project(projectList, child) if
         SQLConf.get.nestedSchemaPruningEnabled && canProjectPushThrough(child) =>
@@ -451,13 +441,58 @@ object GeneratorNestedColumnAliasing {
       // the generator expression. A workaround is to re-construct array of struct
       // from multiple fields. But it will be more complicated and may not worth.
       // TODO(SPARK-34956): support multiple fields.
-      val nestedFieldsOnGenerator = attrToExtractValuesOnGenerator.values.flatten.toSet
-      if (nestedFieldsOnGenerator.size > 1 || nestedFieldsOnGenerator.isEmpty) {
+      val nestedFieldsOnGenerator = attrToExtractValuesOnGenerator.values.flatten.
+        zipWithIndex.map(x => x._1 -> Literal(x._2.toString)).toMap
+      if (nestedFieldsOnGenerator.isEmpty) {
         Some(pushedThrough)
-      } else {
+      } else if (nestedFieldsOnGenerator.size > 1) {
+        pushedThrough match {
+          case p @ Project(_, newG: Generate) =>
+            // Replace the child expression of `ExplodeBase` generator with
+            // nested column accessor.
+            // E.g., df.select(explode($"items").as("item")).select($"item.a") =>
+            //       df.select(explode($"items.a").as("item.a"))
+            val rewrittenG = newG.transformExpressions {
+              case e: ExplodeBase =>
+                val extractor = replaceGenerator(e, nestedFieldsOnGenerator)
+                e.withNewChildren(Seq(extractor))
+            }
+
+            // As we change the child of the generator, its output data type must be updated.
+            val updatedGeneratorOutput = rewrittenG.generatorOutput
+              .zip(toAttributes(rewrittenG.generator.elementSchema))
+              .map { case (oldAttr, newAttr) =>
+                newAttr.withExprId(oldAttr.exprId).withName(oldAttr.name)
+              }
+            assert(updatedGeneratorOutput.length == rewrittenG.generatorOutput.length,
+              "Updated generator output must have the same length " +
+                "with original generator output.")
+            val updatedGenerate = rewrittenG.copy(generatorOutput = updatedGeneratorOutput)
+
+            // Replace nested column accessor with generator output.
+            val attrExprIdsOnGenerator = attrToExtractValuesOnGenerator.keys.map(_.exprId).toSet
+            val updatedProject = p.withNewChildren(Seq(updatedGenerate))
+              .transformExpressions {
+              case f: GetStructField if nestedFieldsOnGenerator.contains(f) =>
+                updatedGenerate.output
+                  .find(a => attrExprIdsOnGenerator.contains(a.exprId))
+                  .map(x => ExtractValue(x,
+                    Literal(nestedFieldsOnGenerator(f)),
+                    SQLConf.get.resolver))
+                  .getOrElse(f)
+              case o: Expression =>
+                o
+            }
+            Some(updatedProject)
+          case other =>
+            // We should not reach here.
+            throw new IllegalStateException(s"Unreasonable plan after optimization: $other")
+        }
+      }
+      else {
         // Only one nested column accessor.
         // E.g., df.select(explode($"items").as("item")).select($"item.a")
-        val nestedFieldOnGenerator = nestedFieldsOnGenerator.head
+        val nestedFieldOnGenerator = nestedFieldsOnGenerator.head._1
         pushedThrough match {
           case p @ Project(_, newG: Generate) =>
             // Replace the child expression of `ExplodeBase` generator with
@@ -527,6 +562,12 @@ object GeneratorNestedColumnAliasing {
       case other =>
         other.mapChildren(replaceGenerator(generator, _))
     }
+  }
+
+  private def replaceGenerator(generator: ExplodeBase,
+                               exprs: Map[ExtractValue, Literal]): Expression = {
+    val seq = exprs.toSeq
+    ArraysZip(seq.map(x => replaceGenerator(generator, x._1)), seq.map(x => x._2))
   }
 
   /**
