@@ -554,6 +554,7 @@ object RemoveRedundantAliases extends Rule[LogicalPlan] {
             val newChild = removeRedundantAliases(child, excluded)
             currentNextAttrPairs ++= createAttributeMapping(child, newChild)
             newChild
+          }
         }
 
         // Create the attribute mapping. Note that the currentNextAttrPairs can contain duplicate
