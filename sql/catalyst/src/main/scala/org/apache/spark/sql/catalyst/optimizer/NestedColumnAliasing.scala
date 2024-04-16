@@ -472,7 +472,7 @@ object GeneratorNestedColumnAliasing extends Logging {
 
             // As we change the child of the generator, its output data type must be updated.
             val updatedGeneratorOutput = rewrittenG.generatorOutput
-              .zip(toAttributes(rewrittenG.generator.elementSchema))
+              .zip(rewrittenG.generator.elementSchema.toAttributes)
               .map { case (oldAttr, newAttr) =>
                 newAttr.withExprId(oldAttr.exprId).withName(oldAttr.name)
               }
@@ -600,9 +600,13 @@ object GeneratorNestedColumnAliasing extends Logging {
         // We cannot simply do a transformUp instead because if we replace the attribute
         // `extractFieldName` could cause `ClassCastException` error. We need to get the
         // field name before replacing down the attribute/other extractor.
-        val fieldName = g.extractFieldName
-        val newChild = replaceGenerator(generator, g.child)
-        ExtractValue(newChild, Literal(fieldName), SQLConf.get.resolver)
+        val fieldName = Literal(g.extractFieldName)
+        replaceGenerator(generator, g.child) match {
+          case a: ArraysZip =>
+            a.names.zip(a.children).find(x => x._1.equals(fieldName)).get._2
+          case other =>
+            ExtractValue(other, fieldName, SQLConf.get.resolver)
+        }
       case ga: GetArrayStructFields =>
         val fieldName = ga.field.name
         val newChild = replaceGenerator(generator, ga.child)
