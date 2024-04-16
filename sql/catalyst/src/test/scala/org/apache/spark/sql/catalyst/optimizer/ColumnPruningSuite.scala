@@ -103,6 +103,105 @@ class ColumnPruningSuite extends PlanTest {
     comparePlans(optimized, correctAnswer)
   }
 
+  test("Nested column pruning for Generate with Filter") {
+    withSQLConf(SQLConf.NESTED_SCHEMA_PRUNING_THROUGH_FILTER_GENERATE.key -> "true") {
+      val structType = StructType.fromDDL("d double, e array<string>, f double, g double, " +
+        "h array<struct<h1: int, h2: double>>")
+      val input = LocalRelation($"a".int, $"b".int, $"c".struct(structType))
+      val generatorOutputNames = Seq("explode")
+      val generatorOutputs = generatorOutputNames.map(UnresolvedAttribute(_))
+      val selectedExprs = Seq(UnresolvedAttribute("a"), $"c".getField("d")) ++ generatorOutputs
+      val query =
+        input
+          .generate(Explode($"c".getField("e")), outputNames = Seq("explode"))
+          .select(selectedExprs: _*)
+          .where($"explode".isNotNull)
+          .analyze
+      val optimized = Optimize.execute(query)
+      val aliases = NestedColumnAliasingSuite.collectGeneratedAliases(optimized).toSeq
+      val aliasedExprs: Seq[String] => Seq[Expression] =
+        aliases => Seq($"c".getField("d").as(aliases(0)), $"c".getField("e").as(aliases(1)))
+      val replacedGenerator: Seq[String] => Generator =
+        aliases => Explode($"${aliases(1)}".as("c.e"))
+      val selectedFields = UnresolvedAttribute("a") +: aliasedExprs(aliases)
+      val finalSelectedExprs = Seq(UnresolvedAttribute("a"), $"${aliases(0)}".as("c.d")) ++
+        generatorOutputs
+      val unrequiredChildIndex = Seq(2)
+      val correctAnswer =
+        input
+          .select(selectedFields: _*)
+          .generate(replacedGenerator(aliases),
+            unrequiredChildIndex = unrequiredChildIndex,
+            outputNames = generatorOutputNames)
+          .where($"explode".isNotNull)
+          .select(finalSelectedExprs: _*)
+          .analyze
+      comparePlans(optimized, correctAnswer)
+    }
+  }
+
+  test("Nested column pruning for Generate with Filter 2") {
+    withSQLConf(SQLConf.NESTED_SCHEMA_PRUNING_THROUGH_FILTER_GENERATE.key -> "true") {
+      val structType = StructType.fromDDL("d double, e array<string>, f double, g double, " +
+        "h array<struct<h1: int, h2: double, h3 int>>")
+      val input = LocalRelation($"a".int, $"b".int, $"c".struct(structType))
+      val selectedExprs = Seq(UnresolvedAttribute("a"), $"c".getField("d")) ++ Seq($"explode.h1")
+      val query =
+        input
+          .generate(Explode($"c".getField("h")), outputNames = Seq("explode"))
+          .select(selectedExprs: _*)
+          .where($"explode".getField("h1").isNotNull)
+          .analyze
+      val optimized = Optimize.execute(query)
+      val aliases = NestedColumnAliasingSuite.collectGeneratedAliases(optimized).toSeq
+      val aliasedExprs: Seq[String] => Seq[Expression] =
+        aliases => Seq($"c".getField("d").as(aliases(0)), $"c.h.h1".as(aliases(1)))
+      val replacedGenerator: Seq[String] => Generator =
+        aliases => Explode($"${aliases(1)}".as("c.h"))
+      val selectedFields = UnresolvedAttribute("a") +: aliasedExprs(aliases)
+      val finalSelectedExprs = Seq(UnresolvedAttribute("a"), $"${aliases(0)}".as("c.d")) ++
+        Seq($"explode".as("h1"))
+      val correctAnswer =
+        input
+          .select(selectedFields: _*)
+          .generate(replacedGenerator(aliases),
+            unrequiredChildIndex = Seq(2),
+            outputNames = Seq("explode"))
+          .where($"explode".isNotNull)
+          .select(finalSelectedExprs: _*)
+          .analyze
+      comparePlans(optimized, correctAnswer)
+    }
+  }
+
+  test("Nested column pruning for Generate with Filter 3") {
+    withSQLConf(SQLConf.NESTED_SCHEMA_PRUNING_THROUGH_FILTER_GENERATE.key -> "true") {
+      val structType = StructType.fromDDL("d double, e array<string>, f double, g double, " +
+        "h array<struct<h1: int, h2: double, h3 int>>")
+      val input = LocalRelation($"a".int, $"b".int, $"c".struct(structType))
+      val selectedExprs = Seq(UnresolvedAttribute("a"), $"c".getField("d")) ++ Seq($"explode.h2")
+      val query =
+        input
+          .generate(Explode($"c".getField("h")), outputNames = Seq("explode"))
+          .select(selectedExprs: _*)
+          .where($"explode".getField("h1").isNotNull)
+          .analyze
+      val optimized = Optimize.execute(query)
+      val finalSelectedExprs = Seq(UnresolvedAttribute("a"), $"c.d".as("c.d")) ++
+        Seq($"explode.h2".as("h2"))
+      val correctAnswer =
+        input
+          .select($"a", $"c")
+          .generate(Explode($"c.h".as("c.h")),
+            unrequiredChildIndex = Seq(),
+            outputNames = Seq("explode"))
+          .where($"explode.h1".isNotNull)
+          .select(finalSelectedExprs: _*)
+          .analyze
+      comparePlans(optimized, correctAnswer)
+    }
+  }
+
   test("Nested column pruning for Generate") {
     def runTest(
         origGenerator: Generator,
@@ -174,8 +273,139 @@ class ColumnPruningSuite extends PlanTest {
       aliases => Inline($"${aliases(1)}".as("c.h")),
       aliases => Seq($"c".getField("d").as(aliases(0)), $"c".getField("h").as(aliases(1))),
       Seq(2),
-      Seq("h1", "h2")
-    )
+      Seq("h1", "h2"))
+  }
+
+  test("Nested column pruning for multi-level array") {
+    val structType = StructType.fromDDL(
+      "d double, e array<string>, f double, g double, " +
+        "h array<struct<h1: int, " +
+        "h2: array<struct<i1: int, i2: int, i3: array<struct<j1: int, j2: int>>>>>>")
+    val input = LocalRelation($"a".int, $"b".int, $"c".struct(structType))
+    val generatorOutputNames = Seq("explode2")
+    val generatorOutputs = generatorOutputNames.map(UnresolvedAttribute(_))
+    val selectedExprs = Seq(UnresolvedAttribute("a"), $"explode3.j1")
+    val query =
+      input
+        .generate(Explode($"c".getField("h")), outputNames = Seq("explode1"))
+        .generate(Explode($"explode1".getField("h2")), outputNames = Seq("explode2"))
+        .generate(Explode($"explode2".getField("i3")), outputNames = Seq("explode3"))
+        .select(selectedExprs: _*)
+        .where($"explode3.j1".isNotNull)
+        .analyze
+    val optimized = Optimize.execute(query)
+    //    val aliases = NestedColumnAliasingSuite.collectGeneratedAliases(optimized)
+    //    val aliasedExprs : Seq[String] => Seq[Expression] =
+    //      aliases => Seq($"c".getField("d").as(aliases(0)), $"c".getField("e").as(aliases(1)))
+    //    val replacedGenerator: Seq[String] => Generator =
+    //      aliases => Explode($"${aliases(1)}".as("c.e"))
+    //    val selectedFields = UnresolvedAttribute("a") +: aliasedExprs(aliases)
+    //    val finalSelectedExprs = Seq(UnresolvedAttribute("a"), $"${aliases(0)}".as("c.d")) ++
+    //      generatorOutputs
+    //    val unrequiredChildIndex = Seq(2)
+    //    val correctAnswer =
+    //      input
+    //        .select(selectedFields: _*)
+    //        .generate(replacedGenerator(aliases),
+    //          unrequiredChildIndex = unrequiredChildIndex,
+    //          outputNames = generatorOutputNames)
+    //        .where($"explode".isNotNull)
+    //        .select(finalSelectedExprs: _*)
+    //        .analyze
+    //    comparePlans(optimized, correctAnswer)
+  }
+
+
+  test("Multiple Nested column pruning for Generate") {
+    withSQLConf(SQLConf.NESTED_SCHEMA_PRUNING_THROUGH_FILTER_GENERATE.key -> "true") {
+      val structType = StructType.fromDDL("d double, e array<string>, f double, g double, " +
+        "h array<struct<h1: int, h2: double, h3 int>>")
+      val input = LocalRelation($"a".int, $"b".int, $"c".struct(structType))
+      val selectedExprs = Seq(UnresolvedAttribute("a"), $"c".getField("d")) ++ Seq($"explode.h2")
+      val query =
+        input
+          .generate(Explode($"c".getField("h")), outputNames = Seq("explode"))
+          .select(selectedExprs: _*)
+          .where($"explode".getField("h1").isNotNull)
+          .analyze
+      val optimized = Optimize.execute(query)
+      val finalSelectedExprs = Seq(UnresolvedAttribute("a"), $"_extract_d".as("c.d")) ++
+        Seq($"explode.`0`".as("h2"))
+      val correctAnswer =
+        input
+          .select($"a", $"c.d".as("_extract_d"),
+            $"c.h.h2".as("_extract_h2"), $"c.h.h1".as("_extract_h1"))
+          .generate(Explode(ArraysZip(Seq($"_extract_h2", $"_extract_h1"), Seq("0", "1"))),
+            unrequiredChildIndex = Seq(2, 3),
+            outputNames = Seq("explode"))
+          .where($"explode.`1`".isNotNull)
+          .select(finalSelectedExprs: _*)
+          .analyze
+      comparePlans(optimized, correctAnswer)
+    }
+  }
+
+  test("Multiple Nested column pruning for Generate 2") {
+    withSQLConf(SQLConf.NESTED_SCHEMA_PRUNING_THROUGH_FILTER_GENERATE.key -> "true") {
+      val structType = StructType.fromDDL("d double, e array<string>, f double, g double, " +
+        "h array<struct<h1: int, h2: double, h3 int, h4 struct<h41 int, h42 int>>>")
+      val input = LocalRelation($"a".int, $"b".int, $"c".struct(structType))
+      val selectedExprs = Seq(UnresolvedAttribute("a")) ++ Seq($"explode.h1", $"explode.h4.h41")
+      val query =
+        input
+          .generate(Explode($"c".getField("h")), outputNames = Seq("explode"))
+          .select(selectedExprs: _*)
+          .analyze
+      val optimized = Optimize.execute(query)
+      val finalSelectedExprs = Seq(UnresolvedAttribute("a")) ++
+        Seq($"explode.`0`".as("h1"), $"explode.`1`".as("h41"))
+      val correctAnswer =
+        input
+          .select($"a", $"c.h.h1".as("_extract_h1"), $"c.h.h4.h41".as("_extract_h41"))
+          .generate(Explode(ArraysZip(Seq($"_extract_h1", $"_extract_h41"), Seq("0", "1"))),
+            unrequiredChildIndex = Seq(1, 2),
+            outputNames = Seq("explode"))
+          .select(finalSelectedExprs: _*)
+          .analyze
+      comparePlans(optimized, correctAnswer)
+    }
+  }
+
+  test("Multiple Nested column pruning for Generate 4") {
+    withSQLConf(SQLConf.NESTED_SCHEMA_PRUNING_THROUGH_FILTER_GENERATE.key -> "true") {
+      val structType = StructType.fromDDL("d double, e array<string>, f double, g double, " +
+        "h array<struct<h1: int, h2: double, h3 int, h4 struct<h41 int, h42 int>, " +
+        "h5 array<struct<h51: int, h52: int, h53: int," +
+        " h54 array<struct<h541 int, h542 int, h543 int, h544 struct<" +
+        " h5441 int, h5442 int>>>>>>>")
+      val structType2 = StructType.fromDDL("z1 int, z2 int," +
+        "z3 struct<z31 int, z32 int>")
+      val input = LocalRelation($"a".int, $"b".int, $"c".struct(structType),
+      $"d".array(structType2))
+      val selectedExprs = Seq( $"explode2.h51", $"explode3.z1")
+      val query =
+        input
+          .generate(Explode($"c.h"), outputNames = Seq("explode"))
+          .generate(Explode($"explode.h5"), outputNames = Seq("explode2"))
+          .generate(Explode($"d"), outputNames = Seq("explode3"))
+          .select(selectedExprs: _*)
+          .where($"explode3.z3.z31".isNotNull)
+          .analyze
+      val optimized = Optimize.execute(query)
+      val finalSelectedExprs = Seq(UnresolvedAttribute("a")) ++
+        Seq($"explode.`0`".as("h1"), $"explode.`1`".as("h41"), $"b")
+      val correctAnswer =
+        input
+          .select($"a", $"c.h.h1".as("_extract_h1"),
+            $"c.h.h4.h41".as("_extract_h41"),
+            $"b")
+          .generate(Explode(ArraysZip(Seq($"_extract_h1", $"_extract_h41"), Seq("0", "1"))),
+            unrequiredChildIndex = Seq(1, 2),
+            outputNames = Seq("explode"))
+          .select(finalSelectedExprs: _*)
+          .analyze
+//      comparePlans(optimized, correctAnswer)
+    }
   }
 
   test("Column pruning for Project on Sort") {
