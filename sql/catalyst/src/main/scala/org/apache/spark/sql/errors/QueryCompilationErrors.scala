@@ -1206,8 +1206,9 @@ private[sql] object QueryCompilationErrors extends QueryErrorsBase with Compilat
                                                     level: Int): Throwable = {
     new AnalysisException(
       errorClass = "INVALID_EXTRACT_FIELD",
-      messageParameters =
-        Array(s"level->$level", child.toString))
+      messageParameters = Map(
+        "field" -> s"level->$level",
+        "expr" -> child.toString))
   }
 
   def dataTypeUnsupportedByExtractValueError(
