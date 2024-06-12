@@ -472,7 +472,7 @@ object GeneratorNestedColumnAliasing extends Logging {
 
             // As we change the child of the generator, its output data type must be updated.
             val updatedGeneratorOutput = rewrittenG.generatorOutput
-              .zip(rewrittenG.generator.elementSchema.toAttributes)
+              .zip(toAttributes(rewrittenG.generator.elementSchema))
               .map { case (oldAttr, newAttr) =>
                 newAttr.withExprId(oldAttr.exprId).withName(oldAttr.name)
               }
