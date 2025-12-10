@@ -19,14 +19,24 @@ package org.apache.spark.util
 
 import scala.jdk.CollectionConverters._
 
+import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuite // scalastyle:ignore funsuite
 
-import org.apache.spark.internal.{Logging, MDC}
-import org.apache.spark.internal.LogKey.EXIT_CODE
+import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKeys.{EXIT_CODE, OFFSET, RANGE}
 
 class MDCSuite
     extends AnyFunSuite // scalastyle:ignore funsuite
-    with Logging {
+    with Logging
+    with BeforeAndAfterAll {
+
+  override def beforeAll(): Unit = {
+    Logging.enableStructuredLogging()
+  }
+
+  override def afterAll(): Unit = {
+    Logging.disableStructuredLogging()
+  }
 
   test("check MDC message") {
     val log = log"This is a log, exitcode ${MDC(EXIT_CODE, 10086)}"
@@ -39,6 +49,34 @@ class MDCSuite
     val log = log"This is a log, exitcode ${MDC(EXIT_CODE, cov)}"
     assert(log.message === "This is a log, exitcode CustomObjectValue: spark, 10086")
     assert(log.context === Map("exit_code" -> "CustomObjectValue: spark, 10086").asJava)
+  }
+
+  test("null as MDC value") {
+    val log = log"This is a log, exitcode ${MDC(EXIT_CODE, null)}"
+    assert(log.message === "This is a log, exitcode null")
+    assert(log.context === Map("exit_code" -> null).asJava)
+  }
+
+  test("the class of value cannot be MDC") {
+    val log = log"This is a log, exitcode ${MDC(EXIT_CODE, "123456")}"
+    val e = intercept[IllegalArgumentException] {
+      MDC(RANGE, log)
+    }
+    assert(e.getMessage ===
+      "requirement failed: the class of value cannot be MessageWithContext")
+  }
+
+  test("check MDC stripMargin") {
+    val log =
+      log"""
+           |The current available offset range is ${MDC(RANGE, "12 - 34")}.
+           | Offset ${MDC(OFFSET, "666")}. is out of range""".stripMargin
+    val expected =
+      s"""
+         |The current available offset range is 12 - 34.
+         | Offset 666. is out of range""".stripMargin
+    assert(log.message === expected)
+    assert(log.context === Map("range" -> "12 - 34", "offset" -> "666").asJava)
   }
 
   case class CustomObjectValue(key: String, value: Int) {

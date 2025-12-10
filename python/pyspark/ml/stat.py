@@ -18,13 +18,16 @@
 import sys
 from typing import Optional, Tuple, TYPE_CHECKING
 
-from pyspark import since, SparkContext
+from pyspark import since
 from pyspark.ml.common import _java2py, _py2java
 from pyspark.ml.linalg import Matrix, Vector
 from pyspark.ml.wrapper import JavaWrapper, _jvm
-from pyspark.sql.column import Column, _to_seq
+from pyspark.ml.util import invoke_helper_relation
+from pyspark.sql.column import Column
 from pyspark.sql.dataframe import DataFrame
 from pyspark.sql.functions import lit
+from pyspark.sql.types import ArrayType, DoubleType
+from pyspark.sql.utils import is_remote
 
 if TYPE_CHECKING:
     from py4j.java_gateway import JavaObject
@@ -102,12 +105,18 @@ class ChiSquareTest:
         >>> row[0].statistic
         4.0
         """
-        sc = SparkContext._active_spark_context
-        assert sc is not None
+        if is_remote():
+            return invoke_helper_relation("chiSquareTest", dataset, featuresCol, labelCol, flatten)
 
-        javaTestObj = _jvm().org.apache.spark.ml.stat.ChiSquareTest
-        args = [_py2java(sc, arg) for arg in (dataset, featuresCol, labelCol, flatten)]
-        return _java2py(sc, javaTestObj.test(*args))
+        else:
+            from pyspark.core.context import SparkContext
+
+            sc = SparkContext._active_spark_context
+            assert sc is not None
+
+            javaTestObj = getattr(_jvm(), "org.apache.spark.ml.stat.ChiSquareTest")
+            args = [_py2java(sc, arg) for arg in (dataset, featuresCol, labelCol, flatten)]
+            return _java2py(sc, javaTestObj.test(*args))
 
 
 class Correlation:
@@ -171,12 +180,18 @@ class Correlation:
                      [        NaN,         NaN,  1.        ,         NaN],
                      [ 0.4       ,  0.9486... ,         NaN,  1.        ]])
         """
-        sc = SparkContext._active_spark_context
-        assert sc is not None
+        if is_remote():
+            return invoke_helper_relation("correlation", dataset, column, method)
 
-        javaCorrObj = _jvm().org.apache.spark.ml.stat.Correlation
-        args = [_py2java(sc, arg) for arg in (dataset, column, method)]
-        return _java2py(sc, javaCorrObj.corr(*args))
+        else:
+            from pyspark.core.context import SparkContext
+
+            sc = SparkContext._active_spark_context
+            assert sc is not None
+
+            javaCorrObj = getattr(_jvm(), "org.apache.spark.ml.stat.Correlation")
+            args = [_py2java(sc, arg) for arg in (dataset, column, method)]
+            return _java2py(sc, javaCorrObj.corr(*args))
 
 
 class KolmogorovSmirnovTest:
@@ -239,15 +254,33 @@ class KolmogorovSmirnovTest:
         >>> round(ksResult.statistic, 3)
         0.175
         """
-        sc = SparkContext._active_spark_context
-        assert sc is not None
+        if is_remote():
+            return invoke_helper_relation(
+                "kolmogorovSmirnovTest",
+                dataset,
+                sampleCol,
+                distName,
+                ([float(p) for p in params], ArrayType(DoubleType())),
+            )
 
-        javaTestObj = _jvm().org.apache.spark.ml.stat.KolmogorovSmirnovTest
-        dataset = _py2java(sc, dataset)
-        params = [float(param) for param in params]  # type: ignore[assignment]
-        return _java2py(
-            sc, javaTestObj.test(dataset, sampleCol, distName, _jvm().PythonUtils.toSeq(params))
-        )
+        else:
+            from pyspark.core.context import SparkContext
+
+            sc = SparkContext._active_spark_context
+            assert sc is not None
+
+            javaTestObj = getattr(_jvm(), "org.apache.spark.ml.stat.KolmogorovSmirnovTest")
+            dataset = _py2java(sc, dataset)
+            params = [float(param) for param in params]  # type: ignore[assignment]
+            return _java2py(
+                sc,
+                javaTestObj.test(
+                    dataset,
+                    sampleCol,
+                    distName,
+                    _jvm().PythonUtils.toSeq(params),
+                ),
+            )
 
 
 class Summarizer:
@@ -383,6 +416,17 @@ class Summarizer:
     @staticmethod
     def _get_single_metric(col: Column, weightCol: Optional[Column], metric: str) -> Column:
         col, weightCol = Summarizer._check_param(col, weightCol)
+
+        if is_remote():
+            # The alias name maybe different from the one in Spark Classic,
+            # because we cannot get the same string representation of the Column object.
+            return (
+                Summarizer.metrics(metric)
+                .summary(col, weightCol)
+                .getField(metric)
+                .alias(f"{metric}({col._expr})")
+            )
+
         return Column(
             JavaWrapper._new_java_obj(
                 "org.apache.spark.ml.stat.Summarizer." + metric, col._jc, weightCol._jc
@@ -424,6 +468,15 @@ class Summarizer:
         -------
         :py:class:`pyspark.ml.stat.SummaryBuilder`
         """
+        if is_remote():
+            builder = SummaryBuilder(None)
+            builder._metrics = [m for m in metrics]  # type: ignore[attr-defined]
+            builder._java_obj = None
+            return builder
+
+        from pyspark.core.context import SparkContext
+        from pyspark.sql.classic.column import _to_seq
+
         sc = SparkContext._active_spark_context
         assert sc is not None
 
@@ -445,7 +498,8 @@ class SummaryBuilder(JavaWrapper):
     """
 
     def __init__(self, jSummaryBuilder: "JavaObject"):
-        super(SummaryBuilder, self).__init__(jSummaryBuilder)
+        if not is_remote():
+            super().__init__(jSummaryBuilder)
 
     def summary(self, featuresCol: Column, weightCol: Optional[Column] = None) -> Column:
         """
@@ -467,6 +521,16 @@ class SummaryBuilder(JavaWrapper):
             an aggregate column that contains the statistics. The exact content of this
             structure is determined during the creation of the builder.
         """
+        if is_remote():
+            from pyspark.sql.connect.functions import builtin as F
+
+            return F._invoke_function(
+                "aggregate_metrics",
+                F.array([F.lit(m) for m in self._metrics]),  # type: ignore[attr-defined]
+                featuresCol,
+                weightCol if weightCol is not None else F.lit(1.0),
+            )
+
         featuresCol, weightCol = Summarizer._check_param(featuresCol, weightCol)
         assert self._java_obj is not None
 

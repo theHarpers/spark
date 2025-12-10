@@ -22,8 +22,8 @@ import java.util.concurrent._
 import scala.util.control.NonFatal
 
 import org.apache.spark.{SparkConf, SparkContext}
-import org.apache.spark.internal.{Logging, MDC}
-import org.apache.spark.internal.LogKey.ERROR
+import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKeys.ERROR
 import org.apache.spark.internal.config.EXECUTOR_ID
 import org.apache.spark.internal.config.Network._
 import org.apache.spark.rpc.{IsolatedRpcEndpoint, RpcEndpoint}

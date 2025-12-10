@@ -32,7 +32,7 @@ import org.apache.spark.util.ManualClock
 class DriverServiceFeatureStepSuite extends SparkFunSuite {
 
   private val LONG_RESOURCE_NAME_PREFIX =
-    "a" * (DriverServiceFeatureStep.MAX_SERVICE_NAME_LENGTH -
+    "a".repeat(DriverServiceFeatureStep.MAX_SERVICE_NAME_LENGTH -
       DriverServiceFeatureStep.DRIVER_SVC_POSTFIX.length + 1)
   private val DRIVER_LABELS = Map(
     "label1key" -> "label1value",
@@ -49,6 +49,7 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
       .set(DRIVER_PORT, 9000)
       .set(DRIVER_BLOCK_MANAGER_PORT, 8080)
       .set(UI_PORT, 4080)
+      .set(CONNECT_GRPC_BINDING_PORT, "15003")
     val kconf = KubernetesTestConf.createDriverConf(
       sparkConf = sparkConf,
       labels = DRIVER_LABELS,
@@ -66,6 +67,7 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
       9000,
       8080,
       4080,
+      15003,
       s"${kconf.resourceNamePrefix}${DriverServiceFeatureStep.DRIVER_SVC_POSTFIX}",
       kconf.appId,
       driverService)
@@ -100,6 +102,7 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
       DEFAULT_DRIVER_PORT,
       DEFAULT_BLOCKMANAGER_PORT,
       UI_PORT.defaultValue.get,
+      DEFAULT_SPARK_CONNECT_SERVER_PORT,
       s"${kconf.resourceNamePrefix}${DriverServiceFeatureStep.DRIVER_SVC_POSTFIX}",
       kconf.appId,
       resolvedService)
@@ -109,17 +112,18 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
   }
 
   test("Long prefixes should switch to using a generated unique name.") {
+    val clock = new ManualClock()
     val sparkConf = new SparkConf(false)
       .set(KUBERNETES_NAMESPACE, "my-namespace")
-    val kconf = KubernetesTestConf.createDriverConf(
-      sparkConf = sparkConf,
-      resourceNamePrefix = Some(LONG_RESOURCE_NAME_PREFIX),
-      labels = DRIVER_LABELS)
-    val clock = new ManualClock()
 
     // Ensure that multiple services created at the same time generate unique names.
     val services = (1 to 10).map { _ =>
-      val configurationStep = new DriverServiceFeatureStep(kconf, clock = clock)
+      val kconf = KubernetesTestConf.createDriverConf(
+        sparkConf = sparkConf,
+        resourceNamePrefix = Some(LONG_RESOURCE_NAME_PREFIX),
+        labels = DRIVER_LABELS,
+        clock = clock)
+      val configurationStep = new DriverServiceFeatureStep(kconf)
       val serviceName = configurationStep
         .getAdditionalKubernetesResources()
         .head
@@ -130,11 +134,11 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
       val hostAddress = configurationStep
         .getAdditionalPodSystemProperties()(DRIVER_HOST_ADDRESS.key)
 
-      (serviceName -> hostAddress)
-    }.toMap
+      Tuple3(kconf, serviceName, hostAddress)
+    }
 
     assert(services.size === 10)
-    services.foreach { case (name, address) =>
+    services.foreach { case (kconf, name, address) =>
       assert(!name.startsWith(kconf.resourceNamePrefix))
       assert(!address.startsWith(kconf.resourceNamePrefix))
       assert(InternetDomainName.isValid(address))
@@ -232,6 +236,7 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
       driverPort: Int,
       blockManagerPort: Int,
       drierUIPort: Int,
+      driverConnectServerPort: Int,
       expectedServiceName: String,
       appId: String,
       service: Service): Unit = {
@@ -248,7 +253,7 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
     DRIVER_SERVICE_ANNOTATIONS.foreach { case (k, v) =>
       assert(service.getMetadata.getAnnotations.get(k) === v)
     }
-    assert(service.getSpec.getPorts.size() === 3)
+    assert(service.getSpec.getPorts.size() === 4)
     val driverServicePorts = service.getSpec.getPorts.asScala
     assert(driverServicePorts.head.getName === DRIVER_PORT_NAME)
     assert(driverServicePorts.head.getPort.intValue() === driverPort)
@@ -259,5 +264,7 @@ class DriverServiceFeatureStepSuite extends SparkFunSuite {
     assert(driverServicePorts(2).getName === UI_PORT_NAME)
     assert(driverServicePorts(2).getPort.intValue() === drierUIPort)
     assert(driverServicePorts(2).getTargetPort.getIntVal === drierUIPort)
+    assert(driverServicePorts(3).getPort.intValue() === driverConnectServerPort)
+    assert(driverServicePorts(3).getTargetPort.getIntVal === driverConnectServerPort)
   }
 }

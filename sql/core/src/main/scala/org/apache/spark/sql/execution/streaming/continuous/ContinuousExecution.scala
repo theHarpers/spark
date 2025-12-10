@@ -25,19 +25,22 @@ import java.util.function.UnaryOperator
 import scala.collection.mutable.{Map => MutableMap}
 
 import org.apache.spark.SparkEnv
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.internal.LogKeys._
 import org.apache.spark.sql.catalyst.expressions.{CurrentDate, CurrentTimestampLike, LocalTimestamp}
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.streaming.{StreamingRelationV2, WriteToStream}
 import org.apache.spark.sql.catalyst.trees.TreePattern.CURRENT_LIKE
+import org.apache.spark.sql.classic.SparkSession
 import org.apache.spark.sql.connector.catalog.{SupportsRead, SupportsWrite, TableCapability}
 import org.apache.spark.sql.connector.distributions.UnspecifiedDistribution
-import org.apache.spark.sql.connector.read.streaming.{ContinuousStream, PartitionOffset, ReadLimit}
+import org.apache.spark.sql.connector.read.streaming.{ContinuousStream, PartitionOffset, ReadLimit, SparkDataStream}
 import org.apache.spark.sql.connector.write.{RequiresDistributionAndOrdering, Write}
 import org.apache.spark.sql.errors.{QueryCompilationErrors, QueryExecutionErrors}
 import org.apache.spark.sql.execution.SQLExecution
 import org.apache.spark.sql.execution.datasources.v2.{StreamingDataSourceV2Relation, StreamingDataSourceV2ScanRelation}
 import org.apache.spark.sql.execution.streaming._
+import org.apache.spark.sql.execution.streaming.checkpointing.{CommitMetadata, OffsetSeq}
+import org.apache.spark.sql.execution.streaming.runtime.{AcceptsLatestSeenOffsetHandler, ACTIVE, ContinuousExecutionContext, IncrementalExecution, ProcessingTimeExecutor, RECONFIGURING, State, StreamExecution, StreamExecutionContext, TERMINATED, WatermarkPropagator}
 import org.apache.spark.sql.streaming.Trigger
 import org.apache.spark.util.ArrayImplicits._
 import org.apache.spark.util.Clock
@@ -62,6 +65,8 @@ class ContinuousExecution(
 
   @volatile protected var sources: Seq[ContinuousStream] = Seq()
 
+  def sourceToIdMap: Map[SparkDataStream, String] = Map.empty
+
   // For use only in test harnesses.
   private[sql] var currentEpochCoordinatorId: String = _
 
@@ -83,7 +88,9 @@ class ContinuousExecution(
         v2ToRelationMap.getOrElseUpdate(s, {
           val metadataPath = s"$resolvedCheckpointRoot/sources/$nextSourceId"
           nextSourceId += 1
-          logInfo(s"Reading table [$table] from DataSourceV2 named '$sourceName' $dsStr")
+          logInfo(log"Reading table [${MDC(STREAMING_TABLE, table)}] " +
+            log"from DataSourceV2 named '${MDC(STREAMING_DATA_SOURCE_NAME, sourceName)}' " +
+            log"${MDC(STREAMING_DATA_SOURCE_DESCRIPTION, dsStr)}")
           // TODO: operator pushdown.
           val scan = table.newScanBuilder(options).build()
           val stream = scan.toContinuousStream(metadataPath)
@@ -181,7 +188,7 @@ class ContinuousExecution(
         val nextOffsets = offsetLog.get(latestEpochId).getOrElse {
           throw new IllegalStateException(
             s"Batch $latestEpochId was committed without end epoch offsets!")
-        }
+        }.asInstanceOf[OffsetSeq]
         committedOffsets = nextOffsets.toStreamProgress(sources)
         execCtx.batchId = latestEpochId + 1
 
@@ -205,7 +212,8 @@ class ContinuousExecution(
     val execCtx = latestExecutionContext
 
     if (execCtx.batchId > 0) {
-      AcceptsLatestSeenOffsetHandler.setLatestSeenOffsetOnSources(Some(offsets), sources)
+      AcceptsLatestSeenOffsetHandler.setLatestSeenOffsetOnSources(
+        Some(offsets), sources, Map.empty[String, SparkDataStream])
     }
 
     val withNewSources: LogicalPlan = logicalPlan transform {
@@ -276,7 +284,7 @@ class ContinuousExecution(
               false
             } else if (isActive) {
               execCtx.batchId = epochEndpoint.askSync[Long](IncrementAndGetEpoch)
-              logInfo(s"New epoch ${execCtx.batchId} is starting.")
+              logInfo(log"New epoch ${MDC(BATCH_ID, execCtx.batchId)} is starting.")
               true
             } else {
               false
@@ -307,7 +315,8 @@ class ContinuousExecution(
     } catch {
       case t: Throwable if StreamExecution.isInterruptionException(t, sparkSession.sparkContext) &&
           state.get() == RECONFIGURING =>
-        logInfo(s"Query $id ignoring exception from reconfiguring: $t")
+        logInfo(log"Query ${MDC(QUERY_ID, id)} ignoring exception from reconfiguring: " +
+          log"${MDC(ERROR, t)}")
         // interrupted by reconfiguration - swallow exception so we can restart the query
     } finally {
       // The above execution may finish before getting interrupted, for example, a Spark job having
@@ -329,7 +338,8 @@ class ContinuousExecution(
           epochUpdateThread.interrupt()
           epochUpdateThread.join()
           // The following line must be the last line because it may fail if SparkContext is stopped
-          sparkSession.sparkContext.cancelJobGroup(runId.toString)
+          sparkSession.sparkContext.cancelJobGroup(runId.toString,
+            s"Continuous execution finished for query $prettyIdString")
         }
       }
       Thread.interrupted()
@@ -440,7 +450,8 @@ class ContinuousExecution(
    */
   def stopInNewThread(error: Throwable): Unit = {
     if (failure.compareAndSet(null, error)) {
-      logError(s"Query $prettyIdString received exception $error")
+      logError(log"Query ${MDC(PRETTY_ID_STRING, prettyIdString)} received exception " +
+        log"${MDC(ERROR, error)}")
       stopInNewThread()
     }
   }
@@ -476,7 +487,7 @@ class ContinuousExecution(
       // We just need to interrupt the long running job.
       interruptAndAwaitExecutionThreadTermination()
     }
-    logInfo(s"Query $prettyIdString was stopped")
+    logInfo(log"Query ${MDC(PRETTY_ID_STRING, prettyIdString)} was stopped")
   }
 }
 

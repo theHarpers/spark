@@ -40,7 +40,9 @@ class KubernetesConfSuite extends SparkFunSuite {
     "execNodeSelectorKey2" -> "execNodeSelectorValue2")
   private val CUSTOM_LABELS = Map(
     "customLabel1Key" -> "customLabel1Value",
-    "customLabel2Key" -> "customLabel2Value")
+    "customLabel2Key" -> "customLabel2Value",
+    "customLabel3Key" -> "{{APP_ID}}",
+    "customLabel4Key" -> "{{EXECUTOR_ID}}")
   private val CUSTOM_ANNOTATIONS = Map(
     "customAnnotation1Key" -> "customAnnotation1Value",
     "customAnnotation2Key" -> "customAnnotation2Value",
@@ -95,7 +97,9 @@ class KubernetesConfSuite extends SparkFunSuite {
       SPARK_APP_ID_LABEL -> KubernetesTestConf.APP_ID,
       SPARK_APP_NAME_LABEL -> KubernetesConf.getAppNameLabel(conf.appName),
       SPARK_ROLE_LABEL -> SPARK_POD_DRIVER_ROLE) ++
-      CUSTOM_LABELS)
+      CUSTOM_LABELS.map {
+        case (k, v) => (k, Utils.substituteAppNExecIds(v, conf.appId, ""))
+      })
     assert(conf.annotations === CUSTOM_ANNOTATIONS.map {
       case (k, v) => (k, Utils.substituteAppNExecIds(v, conf.appId, ""))
     })
@@ -165,7 +169,10 @@ class KubernetesConfSuite extends SparkFunSuite {
       SPARK_APP_ID_LABEL -> KubernetesTestConf.APP_ID,
       SPARK_APP_NAME_LABEL -> KubernetesConf.getAppNameLabel(conf.appName),
       SPARK_ROLE_LABEL -> SPARK_POD_EXECUTOR_ROLE,
-      SPARK_RESOURCE_PROFILE_ID_LABEL -> DEFAULT_RESOURCE_PROFILE_ID.toString) ++ CUSTOM_LABELS)
+      SPARK_RESOURCE_PROFILE_ID_LABEL -> DEFAULT_RESOURCE_PROFILE_ID.toString) ++
+      CUSTOM_LABELS.map {
+        case (k, v) => (k, Utils.substituteAppNExecIds(v, conf.appId, EXECUTOR_ID))
+      })
     assert(conf.annotations === CUSTOM_ANNOTATIONS.map {
       case (k, v) => (k, Utils.substituteAppNExecIds(v, conf.appId, EXECUTOR_ID))
     })
@@ -247,15 +254,15 @@ class KubernetesConfSuite extends SparkFunSuite {
 
   test("SPARK-36566: get app name label") {
     assert(KubernetesConf.getAppNameLabel(" Job+Spark-Pi 2021") === "job-spark-pi-2021")
-    assert(KubernetesConf.getAppNameLabel("a" * 63) === "a" * 63)
-    assert(KubernetesConf.getAppNameLabel("a" * 64) === "a" * 63)
-    assert(KubernetesConf.getAppNameLabel("a" * 253) === "a" * 63)
+    assert(KubernetesConf.getAppNameLabel("a".repeat(63)) === "a".repeat(63))
+    assert(KubernetesConf.getAppNameLabel("a".repeat(64)) === "a".repeat(63))
+    assert(KubernetesConf.getAppNameLabel("a".repeat(253)) === "a".repeat(63))
   }
 
   test("SPARK-38630: K8s label value should start and end with alphanumeric") {
     assert(KubernetesConf.getAppNameLabel("-hello-") === "hello")
-    assert(KubernetesConf.getAppNameLabel("a" * 62 + "-aaa") === "a" * 62)
-    assert(KubernetesConf.getAppNameLabel("-" + "a" * 63) === "a" * 62)
+    assert(KubernetesConf.getAppNameLabel("a".repeat(62) + "-aaa") === "a".repeat(62))
+    assert(KubernetesConf.getAppNameLabel("-" + "a".repeat(63)) === "a".repeat(62))
   }
 
   test("SPARK-40869: Resource name prefix should not start with a hyphen") {
@@ -268,5 +275,15 @@ class KubernetesConfSuite extends SparkFunSuite {
     // scalastyle:on nonascii
       assert(KubernetesConf.getResourceNamePrefix(appName).matches("[a-z]([-a-z0-9]*[a-z0-9])?"))
     }
+  }
+
+  test("SPARK-52902: K8s image configs support {{SPARK_VERSION}} placeholder") {
+    val sparkConf = new SparkConf(false)
+    sparkConf.set(CONTAINER_IMAGE, "apache/spark:{{SPARK_VERSION}}")
+    sparkConf.set(EXECUTOR_CONTAINER_IMAGE, Some("foo.com/spark:{{SPARK_VERSION}}-corp"))
+    val driverUnsetConf = KubernetesTestConf.createDriverConf(sparkConf)
+    val execUnsetConf = KubernetesTestConf.createExecutorConf(sparkConf)
+    assert(driverUnsetConf.image === s"apache/spark:$SPARK_VERSION")
+    assert(execUnsetConf.image === s"foo.com/spark:$SPARK_VERSION-corp")
   }
 }

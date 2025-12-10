@@ -129,15 +129,9 @@ class ResolveReferencesInAggregate(val catalogManager: CatalogManager) extends S
       groupExprs: Seq[Expression]): Seq[Expression] = {
     assert(selectList.forall(_.resolved))
     if (isGroupByAll(groupExprs)) {
-      val expandedGroupExprs = expandGroupByAll(selectList)
-      if (expandedGroupExprs.isEmpty) {
-        // Don't replace the ALL when we fail to infer the grouping columns. We will eventually
-        // tell the user in checkAnalysis that we cannot resolve the all in group by.
-        groupExprs
-      } else {
-        // This is a valid GROUP BY ALL aggregate.
-        expandedGroupExprs.get
-      }
+      // Don't replace the ALL when we fail to infer the grouping columns. We will eventually tell
+      // the user in checkAnalysis that we cannot resolve the all in group by.
+      expandGroupByAll(selectList).getOrElse(groupExprs)
     } else {
       groupExprs
     }

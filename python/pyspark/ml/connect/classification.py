@@ -17,8 +17,6 @@
 from typing import Any, Dict, Union, List, Tuple, Callable, Optional
 import math
 
-import torch
-import torch.nn as torch_nn
 import numpy as np
 import pandas as pd
 
@@ -61,10 +59,12 @@ class _LogisticRegressionParams(
     Params for :py:class:`LogisticRegression` and :py:class:`LogisticRegressionModel`.
 
     .. versionadded:: 3.0.0
+
+    .. deprecated:: 4.0.0
     """
 
     def __init__(self, *args: Any):
-        super(_LogisticRegressionParams, self).__init__(*args)
+        super().__init__(*args)
         self._setDefault(
             maxIter=100,
             tol=1e-6,
@@ -87,6 +87,8 @@ def _train_logistic_regression_model_worker_fn(
     seed: int,
 ) -> Any:
     from pyspark.ml.torch.distributor import _get_spark_partition_data_loader
+    import torch
+    import torch.nn as torch_nn
     from torch.nn.parallel import DistributedDataParallel as DDP
     import torch.distributed
     import torch.optim as optim
@@ -150,6 +152,8 @@ class LogisticRegression(
 
     .. versionadded:: 3.5.0
 
+    .. deprecated:: 4.0.0
+
     Examples
     --------
     >>> from pyspark.ml.connect.classification import LogisticRegression, LogisticRegressionModel
@@ -211,11 +215,14 @@ class LogisticRegression(
             seed: int = 0,
         )
         """
-        super(LogisticRegression, self).__init__()
+        super().__init__()
         kwargs = self._input_kwargs
         self._set(**kwargs)
 
     def _fit(self, dataset: Union[DataFrame, pd.DataFrame]) -> "LogisticRegressionModel":
+        import torch
+        import torch.nn as torch_nn
+
         if isinstance(dataset, pd.DataFrame):
             # TODO: support pandas dataframe fitting
             raise NotImplementedError("Fitting pandas dataframe is not supported yet.")
@@ -284,6 +291,8 @@ class LogisticRegressionModel(
     Model fitted by LogisticRegression.
 
     .. versionadded:: 3.5.0
+
+    .. deprecated:: 4.0.0
     """
 
     def __init__(
@@ -316,6 +325,9 @@ class LogisticRegressionModel(
         return output_cols
 
     def _get_transform_fn(self) -> Callable[["pd.Series"], Any]:
+        import torch
+        import torch.nn as torch_nn
+
         model_state_dict = self.torch_model.state_dict()
         num_features = self.num_features
         num_classes = self.num_classes
@@ -357,6 +369,9 @@ class LogisticRegressionModel(
         return self.__class__.__name__ + ".torch"
 
     def _save_core_model(self, path: str) -> None:
+        import torch
+        import torch.nn as torch_nn
+
         lor_torch_model = torch_nn.Sequential(
             self.torch_model,
             torch_nn.Softmax(dim=1),
@@ -364,6 +379,8 @@ class LogisticRegressionModel(
         torch.save(lor_torch_model, path)
 
     def _load_core_model(self, path: str) -> None:
+        import torch
+
         lor_torch_model = torch.load(path)
         self.torch_model = lor_torch_model[0]
 

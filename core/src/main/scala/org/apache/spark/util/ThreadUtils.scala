@@ -65,7 +65,7 @@ private[spark] object ThreadUtils {
       }
     }
 
-    override def isTerminated: Boolean = synchronized {
+    override def isTerminated: Boolean = {
       lock.lock()
       try {
         serviceIsShutdown && runningTasks == 0
@@ -189,6 +189,23 @@ private[spark] object ThreadUtils {
   }
 
   /**
+   * Simliar to newDaemonFixedThreadPool, but with a bound workQueue, task submission will
+   * be blocked when queue is full.
+   *
+   * @param nThreads the number of threads in the pool
+   * @param workQueueSize the capacity of the queue to use for holding tasks before they are
+   *                      executed. Task submission will be blocked when queue is full.
+   * @param prefix thread names are formatted as prefix-ID, where ID is a unique, sequentially
+   *               assigned integer.
+   * @return BlockingThreadPoolExecutorService
+   */
+  def newDaemonBlockingThreadPoolExecutorService(
+      nThreads: Int, workQueueSize: Int, prefix: String): ExecutorService = {
+    val threadFactory = namedThreadFactory(prefix)
+    new BlockingThreadPoolExecutorService(nThreads, workQueueSize, threadFactory)
+  }
+
+  /**
    * Wrapper over ScheduledThreadPoolExecutor the pool with daemon threads.
    */
   def newDaemonSingleThreadScheduledExecutor(threadName: String): ScheduledExecutorService = {
@@ -231,7 +248,7 @@ private[spark] object ThreadUtils {
   /**
    * Run a piece of code in a new thread and return the result. Exception in the new thread is
    * thrown in the caller thread with an adjusted stack trace that removes references to this
-   * method for clarity. The exception stack traces will be like the following
+   * method for clarity. The exception stack traces will be like the following:
    *
    * SomeException: exception-message
    *   at CallerClass.body-method (sourcefile.scala)
@@ -261,29 +278,49 @@ private[spark] object ThreadUtils {
 
     exception match {
       case Some(realException) =>
-        // Remove the part of the stack that shows method calls into this helper method
-        // This means drop everything from the top until the stack element
-        // ThreadUtils.runInNewThread(), and then drop that as well (hence the `drop(1)`).
-        val baseStackTrace = Thread.currentThread().getStackTrace().dropWhile(
-          ! _.getClassName.contains(this.getClass.getSimpleName)).drop(1)
-
-        // Remove the part of the new thread stack that shows methods call from this helper method
-        val extraStackTrace = realException.getStackTrace.takeWhile(
-          ! _.getClassName.contains(this.getClass.getSimpleName))
-
-        // Combine the two stack traces, with a place holder just specifying that there
-        // was a helper method used, without any further details of the helper
-        val placeHolderStackElem = new StackTraceElement(
-          s"... run in separate thread using ${ThreadUtils.getClass.getName.stripSuffix("$")} ..",
-          " ", "", -1)
-        val finalStackTrace = extraStackTrace ++ Seq(placeHolderStackElem) ++ baseStackTrace
-
-        // Update the stack trace and rethrow the exception in the caller thread
-        realException.setStackTrace(finalStackTrace)
-        throw realException
+        throw wrapCallerStacktrace(realException, dropStacks = 2)
       case None =>
         result
     }
+  }
+
+  /**
+   * Adjust exception stack stace to wrap with caller side thread stack trace.
+   * The exception stack traces will be like the following:
+   *
+   * SomeException: exception-message
+   *   at CallerClass.body-method (sourcefile.scala)
+   *   at ... run in separate thread using org.apache.spark.util.ThreadUtils ... ()
+   *   at CallerClass.caller-method (sourcefile.scala)
+   *   ...
+   */
+  def wrapCallerStacktrace[T <: Throwable](
+       realException: T,
+       combineMessage: String =
+         s"run in separate thread using ${ThreadUtils.getClass.getName.stripSuffix("$")}",
+       dropStacks: Int = 1): T = {
+    require(dropStacks >= 0, "dropStacks must be zero or positive")
+    val simpleName = this.getClass.getSimpleName
+    // Remove the part of the stack that shows method calls into this helper method
+    // This means drop everything from the top until the stack element
+    // ThreadUtils.wrapCallerStack(), and then drop that as well (hence the `drop(1)`).
+    // Large dropStacks allows caller to drop more stacks.
+    val baseStackTrace = Thread.currentThread().getStackTrace
+      .dropWhile(!_.getClassName.contains(simpleName))
+      .drop(dropStacks)
+
+    // Remove the part of the new thread stack that shows methods call from this helper method
+    val extraStackTrace = realException.getStackTrace
+      .takeWhile(!_.getClassName.contains(simpleName))
+
+    // Combine the two stack traces, with a place holder just specifying that there
+    // was a helper method used, without any further details of the helper
+    val placeHolderStackElem = new StackTraceElement(s"... $combineMessage ..", " ", "", -1)
+    val finalStackTrace = extraStackTrace ++ Seq(placeHolderStackElem) ++ baseStackTrace
+
+    // Update the stack trace and rethrow the exception in the caller thread
+    realException.setStackTrace(finalStackTrace)
+    realException
   }
 
   /**

@@ -19,7 +19,7 @@ package org.apache.spark.sql.kafka010
 
 import java.io.{File, IOException}
 import java.net.InetSocketAddress
-import java.nio.charset.StandardCharsets
+import java.nio.file.Files
 import java.util.{Collections, Properties, UUID}
 import java.util.concurrent.TimeUnit
 import javax.security.auth.login.Configuration
@@ -27,7 +27,7 @@ import javax.security.auth.login.Configuration
 import scala.io.Source
 import scala.jdk.CollectionConverters._
 
-import com.google.common.io.Files
+import kafka.log.LogManager
 import kafka.server.{HostedPartition, KafkaConfig, KafkaServer}
 import kafka.server.checkpoints.OffsetCheckpointFile
 import kafka.zk.KafkaZkClient
@@ -42,16 +42,18 @@ import org.apache.kafka.common.network.ListenerName
 import org.apache.kafka.common.requests.FetchRequest
 import org.apache.kafka.common.security.auth.SecurityProtocol.{PLAINTEXT, SASL_PLAINTEXT}
 import org.apache.kafka.common.serialization.StringSerializer
-import org.apache.kafka.common.utils.SystemTime
+import org.apache.kafka.common.utils.Time
 import org.apache.zookeeper.client.ZKClientConfig
 import org.apache.zookeeper.server.{NIOServerCnxnFactory, ZooKeeperServer}
 import org.apache.zookeeper.server.auth.SASLAuthenticationProvider
 import org.scalatest.Assertions._
+import org.scalatest.PrivateMethodTester
 import org.scalatest.concurrent.Eventually._
 import org.scalatest.time.SpanSugar._
 
 import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKeys
 import org.apache.spark.kafka010.KafkaTokenUtil
 import org.apache.spark.util.{SecurityUtils, ShutdownHookManager, Utils}
 import org.apache.spark.util.ArrayImplicits._
@@ -64,12 +66,12 @@ import org.apache.spark.util.ArrayImplicits._
  */
 class KafkaTestUtils(
     withBrokerProps: Map[String, Object] = Map.empty,
-    secure: Boolean = false) extends Logging {
+    secure: Boolean = false) extends PrivateMethodTester with Logging {
 
   private val JAVA_AUTH_CONFIG = "java.security.auth.login.config"
 
   private val localHostNameForURI = Utils.localHostNameForURI()
-  logInfo(s"Local host name is $localHostNameForURI")
+  logInfo(log"Local host name is ${MDC(LogKeys.URI, localHostNameForURI)}")
 
   // MiniKDC uses canonical host name on host part, hence we need to provide canonical host name
   // on the 'host' part of the principal.
@@ -173,7 +175,7 @@ class KafkaTestUtils(
     }
 
     kdc.getKrb5conf.delete()
-    Files.write(krb5confStr, kdc.getKrb5conf, StandardCharsets.UTF_8)
+    Files.writeString(kdc.getKrb5conf.toPath, krb5confStr)
     logDebug(s"krb5.conf file content: $krb5confStr")
   }
 
@@ -237,7 +239,7 @@ class KafkaTestUtils(
       |  principal="$kafkaServerUser@$realm";
       |};
       """.stripMargin.trim
-    Files.write(content, file, StandardCharsets.UTF_8)
+    Files.writeString(file.toPath, content)
     logDebug(s"Created JAAS file: ${file.getPath}")
     logDebug(s"JAAS file content: $content")
     file.getAbsolutePath()
@@ -250,7 +252,7 @@ class KafkaTestUtils(
     // Get the actual zookeeper binding port
     zkPort = zookeeper.actualPort
     zkClient = KafkaZkClient(s"$zkHost:$zkPort", isSecure = false, zkSessionTimeout,
-      zkConnectionTimeout, 1, new SystemTime(), "test", new ZKClientConfig)
+      zkConnectionTimeout, 1, Time.SYSTEM, "test", new ZKClientConfig)
     zkReady = true
   }
 
@@ -332,7 +334,7 @@ class KafkaTestUtils(
         Utils.deleteRecursively(new File(f))
       } catch {
         case e: IOException if Utils.isWindows =>
-          logWarning(e.getMessage)
+          logWarning(log"${MDC(LogKeys.ERROR, e.getMessage)}")
       }
     }
 
@@ -446,12 +448,13 @@ class KafkaTestUtils(
     sendMessages(msgs.toImmutableArraySeq)
   }
 
+  private val cleanupLogsPrivateMethod = PrivateMethod[LogManager](Symbol("cleanupLogs"))
   def cleanupLogs(): Unit = {
-    server.logManager.cleanupLogs()
+    server.logManager.invokePrivate(cleanupLogsPrivateMethod())
   }
 
   private def getOffsets(topics: Set[String], offsetSpec: OffsetSpec): Map[TopicPartition, Long] = {
-    val listOffsetsParams = adminClient.describeTopics(topics.asJava).all().get().asScala
+    val listOffsetsParams = adminClient.describeTopics(topics.asJava).allTopicNames().get().asScala
       .flatMap { topicDescription =>
         topicDescription._2.partitions().asScala.map { topicPartitionInfo =>
           new TopicPartition(topicDescription._1, topicPartitionInfo.partition())
@@ -500,9 +503,7 @@ class KafkaTestUtils(
       props.put("sasl.enabled.mechanisms", "GSSAPI,SCRAM-SHA-512")
     }
 
-    // Can not use properties.putAll(propsMap.asJava) in scala-2.12
-    // See https://github.com/scala/bug/issues/10418
-    withBrokerProps.foreach { case (k, v) => props.put(k, v) }
+    props.putAll(withBrokerProps.asJava)
     props
   }
 
@@ -653,13 +654,13 @@ class KafkaTestUtils(
         Utils.deleteRecursively(snapshotDir)
       } catch {
         case e: IOException if Utils.isWindows =>
-          logWarning(e.getMessage)
+          logWarning(log"${MDC(LogKeys.ERROR, e.getMessage)}")
       }
       try {
         Utils.deleteRecursively(logDir)
       } catch {
         case e: IOException if Utils.isWindows =>
-          logWarning(e.getMessage)
+          logWarning(log"${MDC(LogKeys.ERROR, e.getMessage)}")
       }
       System.clearProperty(ZOOKEEPER_AUTH_PROVIDER)
     }

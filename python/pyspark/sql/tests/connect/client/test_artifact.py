@@ -21,15 +21,15 @@ import unittest
 import os
 
 from pyspark.util import is_remote_only
-from pyspark.errors.exceptions.connect import SparkConnectGrpcException
 from pyspark.sql import SparkSession
 from pyspark.testing.connectutils import ReusedConnectTestCase, should_test_connect
-from pyspark.testing.utils import SPARK_HOME
-from pyspark.sql.functions import udf
+from pyspark.testing.sqlutils import SPARK_HOME
+from pyspark.sql.functions import udf, assert_true, lit
 
 if should_test_connect:
     from pyspark.sql.connect.client.artifact import ArtifactManager
     from pyspark.sql.connect.client import DefaultChannelBuilder
+    from pyspark.errors import SparkRuntimeException
 
 
 class ArtifactTestsMixin:
@@ -46,7 +46,7 @@ class ArtifactTestsMixin:
                 return my_pyfile.my_func()
 
             spark_session.addArtifacts(pyfile_path, pyfile=True)
-            self.assertEqual(spark_session.range(1).select(func("id")).first()[0], 10)
+            spark_session.range(1).select(assert_true(func("id") == lit(10))).show()
 
     def test_add_pyfile(self):
         self.check_add_pyfile(self.spark)
@@ -73,10 +73,14 @@ class ArtifactTestsMixin:
             with open(pyfile_path, "w+") as f:
                 f.write("my_func = lambda: 11")
 
-            with self.assertRaisesRegex(
-                SparkConnectGrpcException, "\\(java.lang.RuntimeException\\) Duplicate Artifact"
-            ):
+            with self.assertRaises(SparkRuntimeException) as pe:
                 self.spark.addArtifacts(pyfile_path, pyfile=True)
+
+            self.check_error(
+                exception=pe.exception,
+                errorClass="ARTIFACT_ALREADY_EXISTS",
+                messageParameters={"normalizedRemoteRelativePath": "pyfiles/my_pyfile.py"},
+            )
 
     def check_add_zipped_package(self, spark_session):
         with tempfile.TemporaryDirectory(prefix="check_add_zipped_package") as d:
@@ -94,7 +98,7 @@ class ArtifactTestsMixin:
                 return my_zipfile.my_func()
 
             spark_session.addArtifacts(f"{package_path}.zip", pyfile=True)
-            self.assertEqual(spark_session.range(1).select(func("id")).first()[0], 5)
+            spark_session.range(1).select(assert_true(func("id") == lit(5))).show()
 
     def test_add_zipped_package(self):
         self.check_add_zipped_package(self.spark)
@@ -130,7 +134,7 @@ class ArtifactTestsMixin:
                 ) as my_file:
                     return my_file.read().strip()
 
-            self.assertEqual(spark_session.range(1).select(func("id")).first()[0], "hello world!")
+            spark_session.range(1).select(assert_true(func("id") == lit("hello world!"))).show()
 
     def test_add_archive(self):
         self.check_add_archive(self.spark)
@@ -160,7 +164,7 @@ class ArtifactTestsMixin:
                 with open(os.path.join(root, "my_file.txt"), "r") as my_file:
                     return my_file.read().strip()
 
-            self.assertEqual(spark_session.range(1).select(func("id")).first()[0], "Hello world!!")
+            spark_session.range(1).select(assert_true(func("id") == lit("Hello world!!"))).show()
 
     def test_add_file(self):
         self.check_add_file(self.spark)
@@ -199,7 +203,7 @@ class ArtifactTests(ReusedConnectTestCase, ArtifactTestsMixin):
 
     @classmethod
     def setUpClass(cls):
-        super(ArtifactTests, cls).setUpClass()
+        super().setUpClass()
         cls.artifact_manager: ArtifactManager = cls.spark._client._artifact_manager
         cls.base_resource_dir = os.path.join(SPARK_HOME, "data")
         cls.artifact_file_path = os.path.join(
@@ -220,6 +224,8 @@ class ArtifactTests(ReusedConnectTestCase, ArtifactTestsMixin):
     def test_basic_requests(self):
         file_name = "smallJar"
         small_jar_path = os.path.join(self.artifact_file_path, f"{file_name}.jar")
+        if not os.path.isfile(small_jar_path):
+            raise unittest.SkipTest(f"Skipped as {small_jar_path} does not exist.")
         response = self.artifact_manager._retrieve_responses(
             self.artifact_manager._create_requests(
                 small_jar_path, pyfile=False, archive=False, file=False
@@ -231,6 +237,8 @@ class ArtifactTests(ReusedConnectTestCase, ArtifactTestsMixin):
         file_name = "smallJar"
         small_jar_path = os.path.join(self.artifact_file_path, f"{file_name}.jar")
         small_jar_crc_path = os.path.join(self.artifact_crc_path, f"{file_name}.txt")
+        if not os.path.isfile(small_jar_path):
+            raise unittest.SkipTest(f"Skipped as {small_jar_path} does not exist.")
 
         requests = list(
             self.artifact_manager._create_requests(
@@ -257,6 +265,8 @@ class ArtifactTests(ReusedConnectTestCase, ArtifactTestsMixin):
         file_name = "junitLargeJar"
         large_jar_path = os.path.join(self.artifact_file_path, f"{file_name}.jar")
         large_jar_crc_path = os.path.join(self.artifact_crc_path, f"{file_name}.txt")
+        if not os.path.isfile(large_jar_path):
+            raise unittest.SkipTest(f"Skipped as {large_jar_path} does not exist.")
 
         requests = list(
             self.artifact_manager._create_requests(
@@ -292,6 +302,8 @@ class ArtifactTests(ReusedConnectTestCase, ArtifactTestsMixin):
         file_name = "smallJar"
         small_jar_path = os.path.join(self.artifact_file_path, f"{file_name}.jar")
         small_jar_crc_path = os.path.join(self.artifact_crc_path, f"{file_name}.txt")
+        if not os.path.isfile(small_jar_path):
+            raise unittest.SkipTest(f"Skipped as {small_jar_path} does not exist.")
 
         requests = list(
             self.artifact_manager._create_requests(
@@ -329,6 +341,10 @@ class ArtifactTests(ReusedConnectTestCase, ArtifactTestsMixin):
         large_jar_path = os.path.join(self.artifact_file_path, f"{file_name2}.jar")
         large_jar_crc_path = os.path.join(self.artifact_crc_path, f"{file_name2}.txt")
         large_jar_size = os.path.getsize(large_jar_path)
+        if not os.path.isfile(small_jar_path):
+            raise unittest.SkipTest(f"Skipped as {small_jar_path} does not exist.")
+        if not os.path.isfile(large_jar_path):
+            raise unittest.SkipTest(f"Skipped as {large_jar_path} does not exist.")
 
         requests = list(
             self.artifact_manager._create_requests(
@@ -425,33 +441,3 @@ class ArtifactTests(ReusedConnectTestCase, ArtifactTestsMixin):
                 self.artifact_manager.add_artifacts(
                     os.path.join(d, "not_existing"), file=True, pyfile=False, archive=False
                 )
-
-
-@unittest.skipIf(is_remote_only(), "Requires local cluster to run")
-class LocalClusterArtifactTests(ReusedConnectTestCase, ArtifactTestsMixin):
-    @classmethod
-    def conf(cls):
-        return (
-            super().conf().set("spark.driver.memory", "512M").set("spark.executor.memory", "512M")
-        )
-
-    @classmethod
-    def root(cls):
-        # In local cluster, we can mimic the production usage.
-        return "."
-
-    @classmethod
-    def master(cls):
-        return "local-cluster[2,2,512]"
-
-
-if __name__ == "__main__":
-    from pyspark.sql.tests.connect.client.test_artifact import *  # noqa: F401
-
-    try:
-        import xmlrunner  # type: ignore
-
-        testRunner = xmlrunner.XMLTestRunner(output="target/test-reports", verbosity=2)
-    except ImportError:
-        testRunner = None
-    unittest.main(testRunner=testRunner, verbosity=2)

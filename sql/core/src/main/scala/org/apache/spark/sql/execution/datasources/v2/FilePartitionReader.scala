@@ -16,13 +16,17 @@
  */
 package org.apache.spark.sql.execution.datasources.v2
 
-import java.io.{FileNotFoundException, IOException}
+import java.io.FileNotFoundException
+
+import org.apache.hadoop.hdfs.BlockMissingException
+import org.apache.hadoop.security.AccessControlException
 
 import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKeys.{CURRENT_FILE, PARTITIONED_FILE_READER}
 import org.apache.spark.rdd.InputFileBlockHolder
 import org.apache.spark.sql.catalyst.FileSourceOptions
 import org.apache.spark.sql.connector.read.PartitionReader
-import org.apache.spark.sql.execution.datasources.PartitionedFile
+import org.apache.spark.sql.execution.datasources.{DataSourceUtils, PartitionedFile}
 
 class FilePartitionReader[T](
     files: Iterator[PartitionedFile],
@@ -38,7 +42,7 @@ class FilePartitionReader[T](
     if (currentReader == null) {
       if (files.hasNext) {
         val file = files.next()
-        logInfo(s"Reading file $file")
+        logInfo(log"Reading file ${MDC(CURRENT_FILE, file)}")
         // Sets InputFileBlockHolder for the file block's information
         InputFileBlockHolder.set(file.urlEncodedPath, file.start, file.length)
         try {
@@ -47,7 +51,9 @@ class FilePartitionReader[T](
           case e: FileNotFoundException if ignoreMissingFiles =>
             logWarning(s"Skipped missing file.", e)
             currentReader = null
-          case e @ (_: RuntimeException | _: IOException) if ignoreCorruptFiles =>
+          case e @ (_ : AccessControlException | _ : BlockMissingException) =>
+            throw FileDataSourceV2.attachFilePath(file.urlEncodedPath, e)
+          case e if ignoreCorruptFiles && DataSourceUtils.shouldIgnoreCorruptFileException(e) =>
             logWarning(
               s"Skipped the rest of the content in the corrupted file.", e)
             currentReader = null
@@ -63,9 +69,11 @@ class FilePartitionReader[T](
     val hasNext = try {
       currentReader != null && currentReader.next()
     } catch {
-      case e @ (_: RuntimeException | _: IOException) if ignoreCorruptFiles =>
-        logWarning(
-          s"Skipped the rest of the content in the corrupted file: $currentReader", e)
+      case e @ (_ : AccessControlException | _ : BlockMissingException) =>
+        throw FileDataSourceV2.attachFilePath(currentReader.file.urlEncodedPath, e)
+      case e if ignoreCorruptFiles && DataSourceUtils.shouldIgnoreCorruptFileException(e) =>
+        logWarning(log"Skipped the rest of the content in the corrupted file: " +
+          log"${MDC(PARTITIONED_FILE_READER, currentReader)}", e)
         false
       case e: Throwable =>
         throw FileDataSourceV2.attachFilePath(currentReader.file.urlEncodedPath, e)

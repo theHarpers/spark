@@ -28,10 +28,12 @@ import org.apache.spark.api.java.{JavaRDD, JavaSparkContext}
 import org.apache.spark.api.r.SerDe
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKeys.CONFIG
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql._
+import org.apache.spark.sql.Row
 import org.apache.spark.sql.catalyst.expressions.{ExprUtils, GenericRowWithSchema, Literal}
 import org.apache.spark.sql.catalyst.parser.CatalystSqlParser
+import org.apache.spark.sql.classic.{DataFrame, RelationalGroupedDataset, SparkSession}
 import org.apache.spark.sql.execution.arrow.ArrowConverters
 import org.apache.spark.sql.internal.StaticSQLConf.CATALOG_IMPLEMENTATION
 import org.apache.spark.sql.types._
@@ -58,9 +60,9 @@ private[sql] object SQLUtils extends Logging {
         SparkSession.builder().enableHiveSupport().sparkContext(jsc.sc).getOrCreate()
       } else {
         if (enableHiveSupport) {
-          logWarning("SparkR: enableHiveSupport is requested for SparkSession but " +
-            s"Spark is not built with Hive or ${CATALOG_IMPLEMENTATION.key} is not set to " +
-            "'hive', falling back to without Hive support.")
+          logWarning(log"SparkR: enableHiveSupport is requested for SparkSession but " +
+            log"Spark is not built with Hive or ${MDC(CONFIG, CATALOG_IMPLEMENTATION.key)} " +
+            log"is not set to 'hive', falling back to without Hive support.")
         }
         SparkSession.builder().sparkContext(jsc.sc).getOrCreate()
       }
@@ -247,7 +249,13 @@ private[sql] object SQLUtils extends Logging {
     val timeZoneId = sparkSession.sessionState.conf.sessionLocalTimeZone
     val rdd = arrowBatchRDD.rdd.mapPartitions { iter =>
       val context = TaskContext.get()
-      ArrowConverters.fromBatchIterator(iter, schema, timeZoneId, true, context)
+      ArrowConverters.fromBatchIterator(
+        iter,
+        schema,
+        timeZoneId,
+        true,
+        false,
+        context)
     }
     sparkSession.internalCreateDataFrame(rdd.setName("arrow"), schema)
   }

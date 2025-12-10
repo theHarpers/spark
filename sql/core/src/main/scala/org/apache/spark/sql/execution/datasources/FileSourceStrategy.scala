@@ -22,6 +22,7 @@ import java.util.Locale
 import scala.collection.mutable
 
 import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKeys.{NUM_PRUNED, POST_SCAN_FILTERS, PUSHED_FILTERS, TOTAL}
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.catalog.BucketSpec
 import org.apache.spark.sql.catalyst.expressions
@@ -30,7 +31,9 @@ import org.apache.spark.sql.catalyst.planning.ScanOperation
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.trees.TreePattern.{PLAN_EXPRESSION, SCALAR_SUBQUERY}
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
+import org.apache.spark.sql.classic.Strategy
 import org.apache.spark.sql.execution.{FileSourceScanExec, SparkPlan}
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{DoubleType, FloatType, StructType}
 import org.apache.spark.util.ArrayImplicits._
 import org.apache.spark.util.collection.BitSet
@@ -137,9 +140,8 @@ object FileSourceStrategy extends Strategy with PredicateHelper with Logging {
 
     val numBucketsSelected = matchedBuckets.cardinality()
 
-    logInfo {
-      s"Pruned ${numBuckets - numBucketsSelected} out of $numBuckets buckets."
-    }
+    logInfo(log"Pruned ${MDC(NUM_PRUNED, numBuckets - numBucketsSelected)} " +
+      log"out of ${MDC(TOTAL, numBuckets)} buckets.")
 
     // None means all the buckets need to be scanned
     if (numBucketsSelected == numBuckets) {
@@ -151,7 +153,7 @@ object FileSourceStrategy extends Strategy with PredicateHelper with Logging {
 
   def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
     case ScanOperation(projects, stayUpFilters, filters,
-      l @ LogicalRelation(fsRelation: HadoopFsRelation, _, table, _)) =>
+      l @ LogicalRelationWithTable(fsRelation: HadoopFsRelation, table)) =>
       // Filters on this relation fall into four categories based on where we can use them to avoid
       // reading unneeded data:
       //  - partition keys only - used to prune directories to read
@@ -160,11 +162,8 @@ object FileSourceStrategy extends Strategy with PredicateHelper with Logging {
       //  - filters that need to be evaluated again after the scan
       val filterSet = ExpressionSet(filters)
 
-      val filtersToPush = filters.filter(f =>
-          DataSourceUtils.shouldPushFilter(f, fsRelation.fileFormat.supportsCollationPushDown))
-
       val normalizedFilters = DataSourceStrategy.normalizeExprs(
-        filtersToPush, l.output)
+        filters.filter(_.deterministic), l.output)
 
       val partitionColumns =
         l.resolve(
@@ -202,23 +201,25 @@ object FileSourceStrategy extends Strategy with PredicateHelper with Logging {
           Some(f)
         }
       }
+
       val supportNestedPredicatePushdown =
         DataSourceUtils.supportNestedPredicatePushdown(fsRelation)
       val pushedFilters = dataFilters
         .flatMap(DataSourceStrategy.translateFilter(_, supportNestedPredicatePushdown))
-      logInfo(s"Pushed Filters: ${pushedFilters.mkString(",")}")
+      logInfo(log"Pushed Filters: ${MDC(PUSHED_FILTERS, pushedFilters.mkString(","))}")
 
       // Predicates with both partition keys and attributes need to be evaluated after the scan.
       val afterScanFilters = filterSet -- partitionKeyFilters.filter(_.references.nonEmpty)
-      logInfo(s"Post-Scan Filters: ${afterScanFilters.mkString(",")}")
+      val maxToStringFields = fsRelation.sparkSession.conf.get(SQLConf.MAX_TO_STRING_FIELDS)
+      logInfo(log"Post-Scan Filters: ${MDC(POST_SCAN_FILTERS,
+        afterScanFilters.simpleString(maxToStringFields))}")
 
       val filterAttributes = AttributeSet(afterScanFilters ++ stayUpFilters)
       val requiredExpressions: Seq[NamedExpression] = filterAttributes.toSeq ++ projects
       val requiredAttributes = AttributeSet(requiredExpressions)
 
-      val readDataColumns = dataColumns
+      val readDataColumns = dataColumnsWithoutPartitionCols
         .filter(requiredAttributes.contains)
-        .filterNot(partitionColumns.contains)
 
       // Metadata attributes are part of a column of type struct up to this point. Here we extract
       // this column from the schema and specify a matcher for that.
@@ -325,6 +326,7 @@ object FileSourceStrategy extends Strategy with PredicateHelper with Logging {
       val scan =
         FileSourceScanExec(
           fsRelation,
+          l.stream,
           outputAttributes,
           outputDataSchema,
           partitionKeyFilters.toSeq,

@@ -20,8 +20,7 @@ package org.apache.spark.sql.catalyst.analysis
 import scala.util.control.NonFatal
 
 import org.apache.spark.internal.Logging
-import org.apache.spark.internal.LogKey._
-import org.apache.spark.internal.MDC
+import org.apache.spark.internal.LogKeys._
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.planning.ExtractEquiJoinKeys
 import org.apache.spark.sql.catalyst.plans.logical.{EventTimeWatermark, LogicalPlan}
@@ -168,7 +167,7 @@ object StreamingJoinHelper extends PredicateHelper with Logging {
     if (constraintTerms.size > 1) {
       logWarning(
         log"Failed to extract state constraint terms: multiple time terms in condition\n\t" +
-          log"${MDC(EXPRESSION_TERMS, terms.mkString("\n\t"))}")
+          log"${MDC(EXPR_TERMS, terms.mkString("\n\t"))}")
       return None
     }
     if (constraintTerms.isEmpty) {
@@ -239,7 +238,7 @@ object StreamingJoinHelper extends PredicateHelper with Logging {
           collect(left, negate) ++ collect(right, negate)
         case Subtract(left, right, _) =>
           collect(left, negate) ++ collect(right, !negate)
-        case TimeAdd(left, right, _) =>
+        case TimestampAddInterval(left, right, _) =>
           collect(left, negate) ++ collect(right, negate)
         case DatetimeSub(_, _, child) => collect(child, negate)
         case UnaryMinus(child, _) =>
@@ -289,7 +288,7 @@ object StreamingJoinHelper extends PredicateHelper with Logging {
           logWarning(
             log"Failed to extract state value watermark from condition " +
               log"${MDC(JOIN_CONDITION, exprToCollectFrom)} due to " +
-              log"${MDC(JOIN_CONDITION_SUB_EXPRESSION, a)}")
+              log"${MDC(JOIN_CONDITION_SUB_EXPR, a)}")
           invalid = true
           Seq.empty
       }

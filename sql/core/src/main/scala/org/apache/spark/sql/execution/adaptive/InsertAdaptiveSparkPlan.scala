@@ -19,6 +19,7 @@ package org.apache.spark.sql.execution.adaptive
 
 import scala.collection.mutable
 
+import org.apache.spark.internal.LogKeys.{CONFIG, SUB_QUERY}
 import org.apache.spark.sql.catalyst.expressions
 import org.apache.spark.sql.catalyst.expressions.{DynamicPruningSubquery, ListQuery, SubqueryExpression}
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
@@ -31,6 +32,7 @@ import org.apache.spark.sql.execution.command.{DataWritingCommandExec, ExecutedC
 import org.apache.spark.sql.execution.datasources.V1WriteCommand
 import org.apache.spark.sql.execution.datasources.v2.V2CommandExec
 import org.apache.spark.sql.execution.exchange.Exchange
+import org.apache.spark.sql.execution.streaming.operators.stateful.StatefulOperator
 import org.apache.spark.sql.internal.SQLConf
 
 /**
@@ -42,6 +44,8 @@ import org.apache.spark.sql.internal.SQLConf
 case class InsertAdaptiveSparkPlan(
     adaptiveExecutionContext: AdaptiveExecutionContext) extends Rule[SparkPlan] {
 
+  override def conf: SQLConf = adaptiveExecutionContext.session.sessionState.conf
+
   override def apply(plan: SparkPlan): SparkPlan = applyInternal(plan, false)
 
   private def applyInternal(plan: SparkPlan, isSubquery: Boolean): SparkPlan = plan match {
@@ -52,6 +56,18 @@ case class InsertAdaptiveSparkPlan(
     case c: DataWritingCommandExec
         if !c.cmd.isInstanceOf[V1WriteCommand] || !conf.plannedWriteEnabled =>
       c.copy(child = apply(c.child))
+    // SPARK-53941: if AQE for stateless streaming is disabled specifically, we disable it here.
+    case _ if !conf.adaptiveExecutionEnabledInStatelessStreaming &&
+      plan.logicalLink.exists(_.isStreaming) => plan
+    // SPARK-53941: Do not apply AQE for stateful streaming workloads. From recent change of shuffle
+    // origin for shuffle being added from stateful operator, we anticipate stateful operator to
+    // work with AQE. But we want to make the adoption of AQE be gradual, to have a risk under
+    // control. Note that we will disable the value of AQE config explicitly in streaming engine,
+    // but also introduce this pattern here for defensive programming.
+    case _ if plan.exists {
+      case _: StatefulOperator => true
+      case _ => false
+    } => plan
     case _ if shouldApplyAQE(plan, isSubquery) =>
       if (supportAdaptive(plan)) {
         try {
@@ -67,8 +83,8 @@ case class InsertAdaptiveSparkPlan(
           AdaptiveSparkPlanExec(newPlan, adaptiveExecutionContext, preprocessingRules, isSubquery)
         } catch {
           case SubqueryAdaptiveNotSupportedException(subquery) =>
-            logWarning(s"${SQLConf.ADAPTIVE_EXECUTION_ENABLED.key} is enabled " +
-              s"but is not supported for sub-query: $subquery.")
+            logWarning(log"${MDC(CONFIG, SQLConf.ADAPTIVE_EXECUTION_ENABLED.key)} is enabled " +
+              log"but is not supported for sub-query: ${MDC(SUB_QUERY, subquery)}.")
             plan
         }
       } else {
@@ -111,9 +127,7 @@ case class InsertAdaptiveSparkPlan(
   }
 
   private def supportAdaptive(plan: SparkPlan): Boolean = {
-    sanityCheck(plan) &&
-      !plan.logicalLink.exists(_.isStreaming) &&
-    plan.children.forall(supportAdaptive)
+    sanityCheck(plan) && plan.children.forall(supportAdaptive)
   }
 
   private def sanityCheck(plan: SparkPlan): Boolean =
@@ -149,7 +163,7 @@ case class InsertAdaptiveSparkPlan(
     // Apply the same instance of this rule to sub-queries so that sub-queries all share the
     // same `stageCache` for Exchange reuse.
     this.applyInternal(
-      QueryExecution.createSparkPlan(adaptiveExecutionContext.session,
+      QueryExecution.createSparkPlan(
         adaptiveExecutionContext.session.sessionState.planner, plan.clone()), true)
   }
 

@@ -22,7 +22,7 @@ A collections of builtin protobuf functions
 
 from typing import Dict, Optional, TYPE_CHECKING, cast
 
-from pyspark.sql.column import Column, _to_java_column
+from pyspark.sql.column import Column
 from pyspark.sql.utils import get_active_spark_context, try_remote_protobuf_functions
 from pyspark.util import _print_missing_jar
 
@@ -139,6 +139,7 @@ def from_protobuf(
     +------------------+
     """
     from py4j.java_gateway import JVMView
+    from pyspark.sql.classic.column import _to_java_column
 
     sc = get_active_spark_context()
     try:
@@ -148,13 +149,13 @@ def from_protobuf(
         elif descFilePath is not None:
             binary_proto = _read_descriptor_set_file(descFilePath)
         if binary_proto is not None:
-            jc = cast(JVMView, sc._jvm).org.apache.spark.sql.protobuf.functions.from_protobuf(
-                _to_java_column(data), messageName, binary_proto, options or {}
-            )
+            jc = getattr(
+                cast(JVMView, sc._jvm), "org.apache.spark.sql.protobuf.functions"
+            ).from_protobuf(_to_java_column(data), messageName, binary_proto, options or {})
         else:
-            jc = cast(JVMView, sc._jvm).org.apache.spark.sql.protobuf.functions.from_protobuf(
-                _to_java_column(data), messageName, options or {}
-            )
+            jc = getattr(
+                cast(JVMView, sc._jvm), "org.apache.spark.sql.protobuf.functions"
+            ).from_protobuf(_to_java_column(data), messageName, options or {})
     except TypeError as e:
         if str(e) == "'JavaPackage' object is not callable":
             _print_missing_jar("Protobuf", "protobuf", "protobuf", sc.version)
@@ -260,6 +261,7 @@ def to_protobuf(
     +----------------------------+
     """
     from py4j.java_gateway import JVMView
+    from pyspark.sql.classic.column import _to_java_column
 
     sc = get_active_spark_context()
     try:
@@ -269,13 +271,13 @@ def to_protobuf(
         elif descFilePath is not None:
             binary_proto = _read_descriptor_set_file(descFilePath)
         if binary_proto is not None:
-            jc = cast(JVMView, sc._jvm).org.apache.spark.sql.protobuf.functions.to_protobuf(
-                _to_java_column(data), messageName, binary_proto, options or {}
-            )
+            jc = getattr(
+                cast(JVMView, sc._jvm), "org.apache.spark.sql.protobuf.functions"
+            ).to_protobuf(_to_java_column(data), messageName, binary_proto, options or {})
         else:
-            jc = cast(JVMView, sc._jvm).org.apache.spark.sql.protobuf.functions.to_protobuf(
-                _to_java_column(data), messageName, options or {}
-            )
+            jc = getattr(
+                cast(JVMView, sc._jvm), "org.apache.spark.sql.protobuf.functions"
+            ).to_protobuf(_to_java_column(data), messageName, options or {})
 
     except TypeError as e:
         if str(e) == "'JavaPackage' object is not callable":
@@ -293,7 +295,7 @@ def _read_descriptor_set_file(filePath: str) -> bytes:
 def _test() -> None:
     import os
     import sys
-    from pyspark.testing.utils import search_jar
+    from pyspark.testing.sqlutils import search_jar
 
     protobuf_jar = search_jar("connector/protobuf", "spark-protobuf-assembly-", "spark-protobuf")
     if protobuf_jar is None:

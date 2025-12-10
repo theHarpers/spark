@@ -59,7 +59,7 @@ object MapStatusesSerDeserBenchmark extends BenchmarkBase {
           Array.fill(blockSize) {
             // Creating block size ranging from 0byte to 1GB
             (r.nextDouble() * 1024 * 1024 * 1024).toLong
-          }, i))
+          }, i, i * 100))
     }
 
     val shuffleStatus = tracker.shuffleStatuses.get(shuffleId).head
@@ -123,7 +123,6 @@ object MapStatusesSerDeserBenchmark extends BenchmarkBase {
   }
 
   override def afterAll(): Unit = {
-    tracker.stop()
     if (sc != null) {
       sc.stop()
     }

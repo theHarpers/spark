@@ -16,7 +16,6 @@
 #
 from __future__ import annotations
 
-import sys
 import unittest
 from inspect import signature
 from typing import Union, Iterator, Tuple, cast, get_type_hints
@@ -157,6 +156,14 @@ class PandasUDFTypeHintsWithFutureAnnotationsTests(ReusedSQLTestCase):
 
         self.assertEqual(
             infer_eval_type(signature(func), get_type_hints(func)), PandasUDFType.GROUPED_AGG
+        )
+
+        def func() -> float:
+            pass
+
+        self.assertEqual(
+            infer_eval_type(signature(func), get_type_hints(func), "pandas"),
+            PandasUDFType.GROUPED_AGG,
         )
 
     def test_type_annotation_negative(self):
@@ -308,10 +315,6 @@ class PandasUDFTypeHintsWithFutureAnnotationsTests(ReusedSQLTestCase):
         expected = df.selectExpr("id + 1 as id")
         assert_frame_equal(expected.toPandas(), actual.toPandas())
 
-    @unittest.skipIf(
-        sys.version_info < (3, 9),
-        "string annotations with future annotations do not work under Python<3.9",
-    )
     def test_string_type_annotation(self):
         def func(col: "pd.Series") -> "pd.Series":
             pass
@@ -364,7 +367,7 @@ class PandasUDFTypeHintsWithFutureAnnotationsTests(ReusedSQLTestCase):
 
 
 if __name__ == "__main__":
-    from pyspark.sql.tests.pandas.test_pandas_udf_typehints_with_future_annotations import *  # noqa: #401
+    from pyspark.sql.tests.pandas.test_pandas_udf_typehints_with_future_annotations import *  # noqa: #F401
 
     try:
         import xmlrunner

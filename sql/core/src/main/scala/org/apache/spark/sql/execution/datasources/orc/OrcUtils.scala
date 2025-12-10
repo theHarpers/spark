@@ -32,6 +32,7 @@ import org.apache.orc.{BooleanColumnStatistics, ColumnStatistics, DateColumnStat
 import org.apache.spark.{SPARK_VERSION_SHORT, SparkException}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKeys.PATH
 import org.apache.spark.sql.{SPARK_VERSION_METADATA_KEY, SparkSession}
 import org.apache.spark.sql.catalyst.{FileSourceOptions, InternalRow}
 import org.apache.spark.sql.catalyst.analysis.caseSensitiveResolution
@@ -87,7 +88,7 @@ object OrcUtils extends Logging {
     } catch {
       case e: org.apache.orc.FileFormatException =>
         if (ignoreCorruptFiles) {
-          logWarning(s"Skipped the footer in the corrupted file: $file", e)
+          logWarning(log"Skipped the footer in the corrupted file: ${MDC(PATH, file)}", e)
           None
         } else {
           throw QueryExecutionErrors.cannotReadFooterForFileError(file, e)
@@ -281,7 +282,7 @@ object OrcUtils extends Logging {
       s"array<${getOrcSchemaString(a.elementType)}>"
     case m: MapType =>
       s"map<${getOrcSchemaString(m.keyType)},${getOrcSchemaString(m.valueType)}>"
-    case _: DayTimeIntervalType | _: TimestampNTZType => LongType.catalogString
+    case _: DayTimeIntervalType | _: TimestampNTZType | _: TimeType => LongType.catalogString
     case _: YearMonthIntervalType => IntegerType.catalogString
     case _ => dt.catalogString
   }
@@ -300,6 +301,10 @@ object OrcUtils extends Logging {
         case n: TimestampNTZType =>
           val typeDesc = new TypeDescription(TypeDescription.Category.LONG)
           typeDesc.setAttribute(CATALYST_TYPE_ATTRIBUTE_NAME, n.typeName)
+          Some(typeDesc)
+        case tm: TimeType =>
+          val typeDesc = new TypeDescription(TypeDescription.Category.LONG)
+          typeDesc.setAttribute(CATALYST_TYPE_ATTRIBUTE_NAME, tm.typeName)
           Some(typeDesc)
         case t: TimestampType =>
           val typeDesc = new TypeDescription(TypeDescription.Category.TIMESTAMP)

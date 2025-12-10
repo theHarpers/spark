@@ -18,8 +18,7 @@
 package org.apache.spark.sql.catalyst.optimizer
 
 import org.apache.spark.SparkIllegalArgumentException
-import org.apache.spark.internal.LogKey.{SQL_TEXT, UNSUPPORTED_EXPRESSION}
-import org.apache.spark.internal.MDC
+import org.apache.spark.internal.LogKeys.{SQL_TEXT, UNSUPPORTED_EXPR}
 import org.apache.spark.sql.catalyst.expressions.{And, ArrayExists, ArrayFilter, CaseWhen, EqualNullSafe, Expression, If, In, InSet, LambdaFunction, Literal, MapFilter, Not, Or}
 import org.apache.spark.sql.catalyst.expressions.Literal.{FalseLiteral, TrueLiteral}
 import org.apache.spark.sql.catalyst.plans.logical.{DeleteAction, DeleteFromTable, Filter, InsertAction, InsertStarAction, Join, LogicalPlan, MergeAction, MergeIntoTable, ReplaceData, UpdateAction, UpdateStarAction, UpdateTable, WriteDelta}
@@ -57,7 +56,7 @@ object ReplaceNullWithFalseInPredicate extends Rule[LogicalPlan] {
     _.containsAnyPattern(NULL_LITERAL, TRUE_OR_FALSE_LITERAL, INSET), ruleId) {
     case f @ Filter(cond, _) => f.copy(condition = replaceNullWithFalse(cond))
     case j @ Join(_, _, _, Some(cond), _) => j.copy(condition = Some(replaceNullWithFalse(cond)))
-    case rd @ ReplaceData(_, cond, _, _, groupFilterCond, _) =>
+    case rd @ ReplaceData(_, cond, _, _, _, groupFilterCond, _) =>
       val newCond = replaceNullWithFalse(cond)
       val newGroupFilterCond = groupFilterCond.map(replaceNullWithFalse)
       rd.copy(condition = newCond, groupFilterCondition = newGroupFilterCond)
@@ -141,7 +140,7 @@ object ReplaceNullWithFalseInPredicate extends Rule[LogicalPlan] {
             "expr" -> e.sql))
       } else {
         val message = log"Expected a Boolean type expression in replaceNullWithFalse, " +
-          log"but got the type `${MDC(UNSUPPORTED_EXPRESSION, e.dataType.catalogString)}` " +
+          log"but got the type `${MDC(UNSUPPORTED_EXPR, e.dataType.catalogString)}` " +
           log"in `${MDC(SQL_TEXT, e.sql)}`."
         logWarning(message)
         e
@@ -150,7 +149,8 @@ object ReplaceNullWithFalseInPredicate extends Rule[LogicalPlan] {
 
   private def replaceNullWithFalse(mergeActions: Seq[MergeAction]): Seq[MergeAction] = {
     mergeActions.map {
-      case u @ UpdateAction(Some(cond), _) => u.copy(condition = Some(replaceNullWithFalse(cond)))
+      case u @ UpdateAction(Some(cond), _, _) =>
+        u.copy(condition = Some(replaceNullWithFalse(cond)))
       case u @ UpdateStarAction(Some(cond)) => u.copy(condition = Some(replaceNullWithFalse(cond)))
       case d @ DeleteAction(Some(cond)) => d.copy(condition = Some(replaceNullWithFalse(cond)))
       case i @ InsertAction(Some(cond), _) => i.copy(condition = Some(replaceNullWithFalse(cond)))

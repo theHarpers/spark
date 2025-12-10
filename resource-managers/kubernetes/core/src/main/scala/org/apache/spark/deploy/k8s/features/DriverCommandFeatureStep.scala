@@ -76,14 +76,6 @@ private[spark] class DriverCommandFeatureStep(conf: KubernetesDriverConf)
   private[spark] def environmentVariables: Map[String, String] = sys.env
 
   private def configureForPython(pod: SparkPod, res: String): SparkPod = {
-    if (conf.get(PYSPARK_MAJOR_PYTHON_VERSION).isDefined) {
-      logWarning(
-          s"${PYSPARK_MAJOR_PYTHON_VERSION.key} was deprecated in Spark 3.1. " +
-          s"Please set '${PYSPARK_PYTHON.key}' and '${PYSPARK_DRIVER_PYTHON.key}' " +
-          s"configurations or $ENV_PYSPARK_PYTHON and $ENV_PYSPARK_DRIVER_PYTHON environment " +
-          "variables instead.")
-    }
-
     val pythonEnvs = {
       KubernetesUtils.buildEnvVars(
         Seq(

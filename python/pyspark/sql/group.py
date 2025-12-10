@@ -19,7 +19,7 @@ import sys
 
 from typing import Callable, List, Optional, TYPE_CHECKING, overload, Dict, Union, cast, Tuple
 
-from pyspark.sql.column import Column, _to_seq
+from pyspark.sql.column import Column
 from pyspark.sql.session import SparkSession
 from pyspark.sql.dataframe import DataFrame
 from pyspark.sql.pandas.group_ops import PandasGroupedOpsMixin
@@ -32,7 +32,7 @@ __all__ = ["GroupedData"]
 
 
 def dfapi(f: Callable[..., DataFrame]) -> Callable[..., DataFrame]:
-    def _api(self: "GroupedData") -> DataFrame:
+    def _api(self: "GroupedData") -> "DataFrame":
         name = f.__name__
         jdf = getattr(self._jgd, name)()
         return DataFrame(jdf, self.session)
@@ -43,7 +43,9 @@ def dfapi(f: Callable[..., DataFrame]) -> Callable[..., DataFrame]:
 
 
 def df_varargs_api(f: Callable[..., DataFrame]) -> Callable[..., DataFrame]:
-    def _api(self: "GroupedData", *cols: str) -> DataFrame:
+    def _api(self: "GroupedData", *cols: str) -> "DataFrame":
+        from pyspark.sql.classic.column import _to_seq
+
         name = f.__name__
         jdf = getattr(self._jgd, name)(_to_seq(self.session._sc, cols))
         return DataFrame(jdf, self.session)
@@ -78,14 +80,14 @@ class GroupedData(PandasGroupedOpsMixin):
             return super().__repr__()
 
     @overload
-    def agg(self, *exprs: Column) -> DataFrame:
+    def agg(self, *exprs: Column) -> "DataFrame":
         ...
 
     @overload
-    def agg(self, __exprs: Dict[str, str]) -> DataFrame:
+    def agg(self, __exprs: Dict[str, str]) -> "DataFrame":
         ...
 
-    def agg(self, *exprs: Union[Column, Dict[str, str]]) -> DataFrame:
+    def agg(self, *exprs: Union[Column, Dict[str, str]]) -> "DataFrame":
         """Compute aggregates and returns the result as a :class:`DataFrame`.
 
         The available aggregate functions can be:
@@ -124,8 +126,8 @@ class GroupedData(PandasGroupedOpsMixin):
 
         Examples
         --------
+        >>> import pandas as pd
         >>> from pyspark.sql import functions as sf
-        >>> from pyspark.sql.functions import pandas_udf, PandasUDFType
         >>> df = spark.createDataFrame(
         ...      [(2, "Alice"), (3, "Alice"), (5, "Bob"), (10, "Bob")], ["age", "name"])
         >>> df.show()
@@ -163,11 +165,12 @@ class GroupedData(PandasGroupedOpsMixin):
 
         Same as above but uses pandas UDF.
 
-        >>> @pandas_udf('int', PandasUDFType.GROUPED_AGG)  # doctest: +SKIP
-        ... def min_udf(v):
+        >>> from pyspark.sql.functions import pandas_udf
+        >>> @pandas_udf('int')
+        ... def min_udf(v: pd.Series) -> int:
         ...     return v.min()
         ...
-        >>> df.groupBy(df.name).agg(min_udf(df.age)).sort("name").show()  # doctest: +SKIP
+        >>> df.groupBy(df.name).agg(min_udf(df.age)).sort("name").show()
         +-----+------------+
         | name|min_udf(age)|
         +-----+------------+
@@ -175,6 +178,8 @@ class GroupedData(PandasGroupedOpsMixin):
         |  Bob|           5|
         +-----+------------+
         """
+        from pyspark.sql.classic.column import _to_seq
+
         assert exprs, "exprs should not be empty"
         if len(exprs) == 1 and isinstance(exprs[0], dict):
             jdf = self._jgd.agg(exprs[0])
@@ -186,7 +191,7 @@ class GroupedData(PandasGroupedOpsMixin):
         return DataFrame(jdf, self.session)
 
     @dfapi
-    def count(self) -> DataFrame:  # type: ignore[empty-body]
+    def count(self) -> "DataFrame":  # type: ignore[empty-body]
         """Counts the number of records for each group.
 
         .. versionadded:: 1.3.0
@@ -237,7 +242,7 @@ class GroupedData(PandasGroupedOpsMixin):
         """
 
     @df_varargs_api
-    def avg(self, *cols: str) -> DataFrame:  # type: ignore[empty-body]
+    def avg(self, *cols: str) -> "DataFrame":  # type: ignore[empty-body]
         """Computes average values for each numeric columns for each group.
 
         :func:`mean` is an alias for :func:`avg`.
@@ -288,7 +293,7 @@ class GroupedData(PandasGroupedOpsMixin):
         """
 
     @df_varargs_api
-    def max(self, *cols: str) -> DataFrame:  # type: ignore[empty-body]
+    def max(self, *cols: str) -> "DataFrame":  # type: ignore[empty-body]
         """Computes the max value for each numeric columns for each group.
 
         .. versionadded:: 1.3.0
@@ -332,7 +337,7 @@ class GroupedData(PandasGroupedOpsMixin):
         """
 
     @df_varargs_api
-    def min(self, *cols: str) -> DataFrame:  # type: ignore[empty-body]
+    def min(self, *cols: str) -> "DataFrame":  # type: ignore[empty-body]
         """Computes the min value for each numeric column for each group.
 
         .. versionadded:: 1.3.0
@@ -451,7 +456,7 @@ class GroupedData(PandasGroupedOpsMixin):
 
         Examples
         --------
-        >>> from pyspark.sql import Row
+        >>> from pyspark.sql import Row, functions as sf
         >>> df1 = spark.createDataFrame([
         ...     Row(course="dotNET", year=2012, earnings=10000),
         ...     Row(course="Java", year=2012, earnings=20000),
@@ -469,27 +474,30 @@ class GroupedData(PandasGroupedOpsMixin):
         |dotNET|2013|   48000|
         |  Java|2013|   30000|
         +------+----+--------+
+
         >>> df2 = spark.createDataFrame([
         ...     Row(training="expert", sales=Row(course="dotNET", year=2012, earnings=10000)),
         ...     Row(training="junior", sales=Row(course="Java", year=2012, earnings=20000)),
         ...     Row(training="expert", sales=Row(course="dotNET", year=2012, earnings=5000)),
         ...     Row(training="junior", sales=Row(course="dotNET", year=2013, earnings=48000)),
         ...     Row(training="expert", sales=Row(course="Java", year=2013, earnings=30000)),
-        ... ])  # doctest: +SKIP
-        >>> df2.show()  # doctest: +SKIP
-        +--------+--------------------+
-        |training|               sales|
-        +--------+--------------------+
-        |  expert|{dotNET, 2012, 10...|
-        |  junior| {Java, 2012, 20000}|
-        |  expert|{dotNET, 2012, 5000}|
-        |  junior|{dotNET, 2013, 48...|
-        |  expert| {Java, 2013, 30000}|
-        +--------+--------------------+
+        ... ])
+        >>> df2.show(truncate=False)
+        +--------+---------------------+
+        |training|sales                |
+        +--------+---------------------+
+        |expert  |{dotNET, 2012, 10000}|
+        |junior  |{Java, 2012, 20000}  |
+        |expert  |{dotNET, 2012, 5000} |
+        |junior  |{dotNET, 2013, 48000}|
+        |expert  |{Java, 2013, 30000}  |
+        +--------+---------------------+
 
         Compute the sum of earnings for each year by course with each course as a separate column
 
-        >>> df1.groupBy("year").pivot("course", ["dotNET", "Java"]).sum("earnings").show()
+        >>> df1.groupBy("year").pivot(
+        ...    "course", ["dotNET", "Java"]
+        ... ).sum("earnings").sort("year").show()
         +----+------+-----+
         |year|dotNET| Java|
         +----+------+-----+
@@ -499,15 +507,17 @@ class GroupedData(PandasGroupedOpsMixin):
 
         Or without specifying column values (less efficient)
 
-        >>> df1.groupBy("year").pivot("course").sum("earnings").show()
+        >>> df1.groupBy("year").pivot("course").sum("earnings").sort("year").show()
         +----+-----+------+
         |year| Java|dotNET|
         +----+-----+------+
         |2012|20000| 15000|
         |2013|30000| 48000|
         +----+-----+------+
-        >>> df2.groupBy("sales.year").pivot("sales.course").sum("sales.earnings").show()
-        ... # doctest: +SKIP
+
+        >>> df2.groupBy("sales.year").pivot(
+        ...     "sales.course"
+        ... ).agg(sf.sum("sales.earnings")).sort("year").show()
         +----+-----+------+
         |year| Java|dotNET|
         +----+-----+------+
@@ -526,8 +536,13 @@ def _test() -> None:
     import doctest
     from pyspark.sql import SparkSession
     import pyspark.sql.group
+    from pyspark.testing.utils import have_pandas, have_pyarrow
 
     globs = pyspark.sql.group.__dict__.copy()
+
+    if not have_pandas or not have_pyarrow:
+        del pyspark.sql.group.GroupedData.agg.__doc__
+
     spark = SparkSession.builder.master("local[4]").appName("sql.group tests").getOrCreate()
     globs["spark"] = spark
 

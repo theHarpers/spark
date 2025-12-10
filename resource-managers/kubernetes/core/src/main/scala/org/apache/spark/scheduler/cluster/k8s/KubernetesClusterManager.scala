@@ -21,11 +21,12 @@ import java.io.File
 import io.fabric8.kubernetes.client.Config
 import io.fabric8.kubernetes.client.KubernetesClient
 
-import org.apache.spark.{SparkConf, SparkContext, SparkMasterRegex}
+import org.apache.spark.{SparkConf, SparkContext, SparkException, SparkMasterRegex}
 import org.apache.spark.deploy.k8s.{KubernetesConf, KubernetesUtils, SparkKubernetesClientFactory}
 import org.apache.spark.deploy.k8s.Config._
 import org.apache.spark.deploy.k8s.Constants.DEFAULT_EXECUTOR_CONTAINER_NAME
 import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKeys.MASTER_URL
 import org.apache.spark.internal.config.TASK_MAX_FAILURES
 import org.apache.spark.scheduler.{ExternalClusterManager, SchedulerBackend, TaskScheduler, TaskSchedulerImpl}
 import org.apache.spark.scheduler.local.LocalSchedulerBackend
@@ -34,7 +35,7 @@ import org.apache.spark.util.{Clock, SystemClock, ThreadUtils, Utils}
 private[spark] class KubernetesClusterManager extends ExternalClusterManager with Logging {
   import SparkMasterRegex._
 
-  override def canCreate(masterURL: String): Boolean = masterURL.startsWith("k8s")
+  override def canCreate(masterURL: String): Boolean = SparkMasterRegex.isK8s(masterURL)
 
   private def isLocal(conf: SparkConf): Boolean =
     conf.get(KUBERNETES_DRIVER_MASTER_URL).startsWith("local")
@@ -61,7 +62,7 @@ private[spark] class KubernetesClusterManager extends ExternalClusterManager wit
           if (threads == "*") localCpuCount else threads.toInt
         case _ => 1
       }
-      logInfo(s"Running Spark with ${sc.conf.get(KUBERNETES_DRIVER_MASTER_URL)}")
+      logInfo(log"Running Spark with ${MDC(MASTER_URL, sc.conf.get(KUBERNETES_DRIVER_MASTER_URL))}")
       val schedulerImpl = scheduler.asInstanceOf[TaskSchedulerImpl]
       // KubernetesClusterSchedulerBackend respects `spark.app.id` while LocalSchedulerBackend
       // does not. Propagate `spark.app.id` via `spark.test.appId` to match the behavior.
@@ -159,9 +160,19 @@ private[spark] class KubernetesClusterManager extends ExternalClusterManager wit
 
   private[k8s] def makeExecutorPodsAllocator(sc: SparkContext, kubernetesClient: KubernetesClient,
       snapshotsStore: ExecutorPodsSnapshotsStore) = {
-    val executorPodsAllocatorName = sc.conf.get(KUBERNETES_ALLOCATION_PODS_ALLOCATOR) match {
+    val allocator = sc.conf.get(KUBERNETES_ALLOCATION_PODS_ALLOCATOR)
+    if (allocator == "deployment" && Utils.isDynamicAllocationEnabled(sc.conf) &&
+      sc.conf.get(KUBERNETES_EXECUTOR_POD_DELETION_COST).isEmpty) {
+      throw new SparkException(
+        s"Dynamic allocation with the deployment pods allocator requires " +
+          s"'${KUBERNETES_EXECUTOR_POD_DELETION_COST.key}' to be configured.")
+    }
+
+    val executorPodsAllocatorName = allocator match {
       case "statefulset" =>
         classOf[StatefulSetPodsAllocator].getName
+      case "deployment" =>
+        classOf[DeploymentPodsAllocator].getName
       case "direct" =>
         classOf[ExecutorPodsAllocator].getName
       case fullClass =>

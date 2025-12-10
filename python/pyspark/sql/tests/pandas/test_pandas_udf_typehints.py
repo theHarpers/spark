@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import sys
 import unittest
 from inspect import signature
 from typing import Union, Iterator, Tuple, cast, get_type_hints
@@ -27,9 +26,10 @@ from pyspark.testing.sqlutils import (
     pandas_requirement_message,
     pyarrow_requirement_message,
 )
-from pyspark.sql.pandas.typehints import infer_eval_type
+from pyspark.sql.pandas.typehints import infer_eval_type, infer_group_pandas_eval_type
 from pyspark.sql.pandas.functions import pandas_udf, PandasUDFType
 from pyspark.sql import Row
+from pyspark.util import PythonEvalType
 
 if have_pandas:
     import pandas as pd
@@ -114,7 +114,6 @@ class PandasUDFTypeHintsTests(ReusedSQLTestCase):
             infer_eval_type(signature(func), get_type_hints(func)), PandasUDFType.SCALAR_ITER
         )
 
-    @unittest.skipIf(sys.version_info < (3, 9), "Type hinting generics require Python 3.9.")
     def test_type_annotation_tuple_generics(self):
         def func(iter: Iterator[tuple[pd.DataFrame, pd.Series]]) -> Iterator[pd.DataFrame]:
             pass
@@ -179,6 +178,57 @@ class PandasUDFTypeHintsTests(ReusedSQLTestCase):
         self.assertEqual(
             infer_eval_type(signature(func), get_type_hints(func)), PandasUDFType.GROUPED_AGG
         )
+
+        def func() -> float:
+            pass
+
+        self.assertEqual(
+            infer_eval_type(signature(func), get_type_hints(func), "pandas"),
+            PandasUDFType.GROUPED_AGG,
+        )
+
+    def test_type_annotation_group_map(self):
+        # pd.DataFrame -> pd.DataFrame
+        def func(col: pd.DataFrame) -> pd.DataFrame:
+            pass
+
+        self.assertEqual(
+            infer_group_pandas_eval_type(signature(func), get_type_hints(func)),
+            PythonEvalType.SQL_GROUPED_MAP_PANDAS_UDF,
+        )
+
+        # Tuple[Any, ...], pd.DataFrame -> pd.DataFrame
+        def func(key: Tuple, col: pd.DataFrame) -> pd.DataFrame:
+            pass
+
+        self.assertEqual(
+            infer_group_pandas_eval_type(signature(func), get_type_hints(func)),
+            PythonEvalType.SQL_GROUPED_MAP_PANDAS_UDF,
+        )
+
+        # Iterator[pd.DataFrame] -> Iterator[pd.DataFrame]
+        def func(col: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
+            pass
+
+        self.assertEqual(
+            infer_group_pandas_eval_type(signature(func), get_type_hints(func)),
+            PythonEvalType.SQL_GROUPED_MAP_PANDAS_ITER_UDF,
+        )
+
+        # Tuple[Any, ...], Iterator[pd.DataFrame] -> Iterator[pd.DataFrame]
+        def func(key: Tuple, col: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
+            pass
+
+        self.assertEqual(
+            infer_group_pandas_eval_type(signature(func), get_type_hints(func)),
+            PythonEvalType.SQL_GROUPED_MAP_PANDAS_ITER_UDF,
+        )
+
+        # Should return None for unsupported signatures
+        def func(col: Iterator[pd.Series]) -> Iterator[pd.Series]:
+            pass
+
+        self.assertEqual(infer_group_pandas_eval_type(signature(func), get_type_hints(func)), None)
 
     def test_type_annotation_negative(self):
         def func(col: str) -> pd.Series:
@@ -379,9 +429,22 @@ class PandasUDFTypeHintsTests(ReusedSQLTestCase):
             infer_eval_type(signature(func), get_type_hints(func)), PandasUDFType.SCALAR
         )
 
+    @unittest.skipIf(not have_pyarrow, pyarrow_requirement_message)
+    def test_negative_with_arrow_udf(self):
+        import pyarrow as pa
+
+        with self.assertRaisesRegex(
+            Exception,
+            "Unsupported signature:.*pyarrow.lib.Array.",
+        ):
+
+            @pandas_udf("long")
+            def multiply_arrow(a: pa.Array, b: pa.Array) -> pa.Array:
+                return pa.compute.multiply(a, b)
+
 
 if __name__ == "__main__":
-    from pyspark.sql.tests.pandas.test_pandas_udf_typehints import *  # noqa: #401
+    from pyspark.sql.tests.pandas.test_pandas_udf_typehints import *  # noqa: #F401
 
     try:
         import xmlrunner

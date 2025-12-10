@@ -24,11 +24,9 @@ import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 import scala.jdk.CollectionConverters._
 
-import org.apache.commons.io.FileUtils
-import org.apache.commons.io.filefilter.TrueFileFilter
-
 import org.apache.spark._
 import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKeys.{RMSE, TEST_SIZE, TRAINING_SIZE}
 import org.apache.spark.ml.linalg.{BLAS, Vectors}
 import org.apache.spark.ml.recommendation.ALS._
 import org.apache.spark.ml.util.{DefaultReadWriteTest, MLTest, MLTestingUtils}
@@ -353,8 +351,8 @@ class ALSSuite extends MLTest with DefaultReadWriteTest with Logging {
         }
       }
     }
-    logInfo(s"Generated an explicit feedback dataset with ${training.size} ratings for training " +
-      s"and ${test.size} for test.")
+    logInfo(log"Generated an explicit feedback dataset with ${MDC(TRAINING_SIZE, training.size)} " +
+      log"ratings for training and ${MDC(TEST_SIZE, test.size)} for test.")
     (sc.parallelize(training.toSeq, 2), sc.parallelize(test.toSeq, 2))
   }
 
@@ -485,7 +483,7 @@ class ALSSuite extends MLTest with DefaultReadWriteTest with Logging {
               val mse = errorSquares.sum / errorSquares.length
               math.sqrt(mse)
             }
-          logInfo(s"Test RMSE is $rmse.")
+          logInfo(log"Test RMSE is ${MDC(RMSE, rmse)}.")
           assert(rmse < targetRMSE)
     }
 
@@ -1026,13 +1024,7 @@ class ALSCleanerSuite extends SparkFunSuite with LocalRootDirsTest {
     val conf = new SparkConf()
     val localDir = Utils.createTempDir()
     val checkpointDir = Utils.createTempDir()
-    def getAllFiles: Set[File] = {
-      val files = FileUtils.listFiles(
-        localDir,
-        TrueFileFilter.INSTANCE,
-        TrueFileFilter.INSTANCE).asScala.toSet
-      files
-    }
+    def getAllFiles: Set[File] = Utils.listFiles(localDir).asScala.toSet
     try {
       conf.set("spark.local.dir", localDir.getAbsolutePath)
       val sc = new SparkContext("local[2]", "ALSCleanerSuite", conf)
@@ -1126,6 +1118,24 @@ class ALSStorageSuite extends SparkFunSuite with MLlibTestSparkContext with Defa
     }
     levels.foreach(level => assert(level == StorageLevel.MEMORY_ONLY))
     nonDefaultListener.storageLevels.foreach(level => assert(level == StorageLevel.DISK_ONLY))
+  }
+
+  test("saved model size estimation") {
+    import testImplicits._
+
+    val als = new ALS().setMaxIter(1).setRank(8)
+    val estimatedDFSize = (3 + 2) * (8 + 1) * 4
+    val df = sc.parallelize(Seq(
+      (123, 1, 0.5),
+      (123, 2, 0.7),
+      (123, 3, 0.6),
+      (111, 2, 1.0),
+      (111, 1, 0.1)
+    )).toDF("item", "user", "rating")
+    assert(als.estimateModelSize(df) === estimatedDFSize)
+
+    val model = als.fit(df)
+    assert(model.estimatedSize == estimatedDFSize)
   }
 }
 
@@ -1246,8 +1256,8 @@ object ALSSuite extends Logging {
         }
       }
     }
-    logInfo(s"Generated an implicit feedback dataset with ${training.size} ratings for training " +
-      s"and ${test.size} for test.")
+    logInfo(log"Generated an implicit feedback dataset with ${MDC(TRAINING_SIZE, training.size)}" +
+      log" ratings for training and ${MDC(TEST_SIZE, test.size)} for test.")
     (sc.parallelize(training.toSeq, 2), sc.parallelize(test.toSeq, 2))
   }
 }

@@ -24,6 +24,7 @@ import org.apache.arrow.vector.complex._
 
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.SpecializedGetters
+import org.apache.spark.sql.catalyst.util.STUtils
 import org.apache.spark.sql.errors.ExecutionErrors
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.util.ArrowUtils
@@ -33,8 +34,10 @@ object ArrowWriter {
   def create(
       schema: StructType,
       timeZoneId: String,
-      errorOnDuplicatedFieldNames: Boolean = true): ArrowWriter = {
-    val arrowSchema = ArrowUtils.toArrowSchema(schema, timeZoneId, errorOnDuplicatedFieldNames)
+      errorOnDuplicatedFieldNames: Boolean = true,
+      largeVarTypes: Boolean = false): ArrowWriter = {
+    val arrowSchema = ArrowUtils.toArrowSchema(
+      schema, timeZoneId, errorOnDuplicatedFieldNames, largeVarTypes)
     val root = VectorSchemaRoot.create(arrowSchema, ArrowUtils.rootAllocator)
     create(root)
   }
@@ -66,6 +69,7 @@ object ArrowWriter {
       case (DateType, vector: DateDayVector) => new DateWriter(vector)
       case (TimestampType, vector: TimeStampMicroTZVector) => new TimestampWriter(vector)
       case (TimestampNTZType, vector: TimeStampMicroVector) => new TimestampNTZWriter(vector)
+      case (_: TimeType, vector: TimeNanoVector) => new TimeWriter(vector)
       case (ArrayType(_, _), vector: ListVector) =>
         val elementVector = createFieldWriter(vector.getDataVector())
         new ArrayWriter(vector, elementVector)
@@ -84,6 +88,21 @@ object ArrowWriter {
       case (_: DayTimeIntervalType, vector: DurationVector) => new DurationWriter(vector)
       case (CalendarIntervalType, vector: IntervalMonthDayNanoVector) =>
         new IntervalMonthDayNanoWriter(vector)
+      case (VariantType, vector: StructVector) =>
+        val children = (0 until vector.size()).map { ordinal =>
+          createFieldWriter(vector.getChildByOrdinal(ordinal))
+        }
+        new StructWriter(vector, children.toArray)
+      case (dt: GeometryType, vector: StructVector) =>
+        val children = (0 until vector.size()).map { ordinal =>
+          createFieldWriter(vector.getChildByOrdinal(ordinal))
+        }
+        new GeometryWriter(dt, vector, children.toArray)
+      case (dt: GeographyType, vector: StructVector) =>
+        val children = (0 until vector.size()).map { ordinal =>
+          createFieldWriter(vector.getChildByOrdinal(ordinal))
+        }
+        new GeographyWriter(dt, vector, children.toArray)
       case (dt, _) =>
         throw ExecutionErrors.unsupportedDataTypeError(dt)
     }
@@ -103,6 +122,16 @@ class ArrowWriter(val root: VectorSchemaRoot, fields: Array[ArrowFieldWriter]) {
       i += 1
     }
     count += 1
+  }
+
+  def sizeInBytes(): Int = {
+    var i = 0
+    var bytes = 0
+    while (i < fields.size) {
+      bytes += fields(i).getSizeInBytes()
+      i += 1
+    }
+    bytes
   }
 
   def finish(): Unit = {
@@ -141,6 +170,13 @@ private[arrow] abstract class ArrowFieldWriter {
 
   def finish(): Unit = {
     valueVector.setValueCount(count)
+  }
+
+  def getSizeInBytes(): Int = {
+    valueVector.setValueCount(count)
+    // Before calling getBufferSizeFor, we need to call
+    // `setValueCount`, see https://github.com/apache/arrow/pull/9187#issuecomment-763362710
+    valueVector.getBufferSizeFor(count)
   }
 
   def reset(): Unit = {
@@ -335,6 +371,18 @@ private[arrow] class TimestampNTZWriter(
   }
 }
 
+private[arrow] class TimeWriter(
+    val valueVector: TimeNanoVector) extends ArrowFieldWriter {
+
+  override def setNull(): Unit = {
+    valueVector.setNull(count)
+  }
+
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    valueVector.setSafe(count, input.getLong(ordinal))
+  }
+}
+
 private[arrow] class ArrayWriter(
     val valueVector: ListVector,
     val elementWriter: ArrowFieldWriter) extends ArrowFieldWriter {
@@ -368,6 +416,8 @@ private[arrow] class StructWriter(
     val valueVector: StructVector,
     children: Array[ArrowFieldWriter]) extends ArrowFieldWriter {
 
+  lazy val isVariant = ArrowUtils.isVariantField(valueVector.getField)
+
   override def setNull(): Unit = {
     var i = 0
     while (i < children.length) {
@@ -379,12 +429,20 @@ private[arrow] class StructWriter(
   }
 
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
-    val struct = input.getStruct(ordinal, children.length)
-    var i = 0
-    valueVector.setIndexDefined(count)
-    while (i < struct.numFields) {
-      children(i).write(struct, i)
-      i += 1
+    if (isVariant) {
+      valueVector.setIndexDefined(count)
+      val v = input.getVariant(ordinal)
+      val row = InternalRow(v.getValue, v.getMetadata)
+      children(0).write(row, 0)
+      children(1).write(row, 1)
+    } else {
+      val struct = input.getStruct(ordinal, children.length)
+      var i = 0
+      valueVector.setIndexDefined(count)
+      while (i < struct.numFields) {
+        children(i).write(struct, i)
+        i += 1
+      }
     }
   }
 
@@ -396,6 +454,42 @@ private[arrow] class StructWriter(
   override def reset(): Unit = {
     super.reset()
     children.foreach(_.reset())
+  }
+}
+
+private[arrow] class GeographyWriter(
+    dt: GeographyType,
+    valueVector: StructVector,
+    children: Array[ArrowFieldWriter]) extends StructWriter(valueVector, children) {
+
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    valueVector.setIndexDefined(count)
+
+    val geom = STUtils.deserializeGeog(input.getGeography(ordinal), dt)
+    val bytes = geom.getBytes
+    val srid = geom.getSrid
+
+    val row = InternalRow(srid, bytes)
+    children(0).write(row, 0)
+    children(1).write(row, 1)
+  }
+}
+
+private[arrow] class GeometryWriter(
+    dt: GeometryType,
+    valueVector: StructVector,
+    children: Array[ArrowFieldWriter]) extends StructWriter(valueVector, children) {
+
+  override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
+    valueVector.setIndexDefined(count)
+
+    val geom = STUtils.deserializeGeom(input.getGeometry(ordinal), dt)
+    val bytes = geom.getBytes
+    val srid = geom.getSrid
+
+    val row = InternalRow(srid, bytes)
+    children(0).write(row, 0)
+    children(1).write(row, 1)
   }
 }
 

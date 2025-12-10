@@ -16,26 +16,33 @@
 # limitations under the License.
 #
 
+import os
 import unittest
 
-from pyspark.sql import SparkSession
+from pyspark.util import is_remote_only
 from pyspark.testing.connectutils import should_test_connect, connect_requirement_message
+from pyspark.testing.utils import have_torch, torch_requirement_message
+from pyspark.testing.connectutils import ReusedConnectTestCase
 
 if should_test_connect:
     from pyspark.ml.tests.connect.test_legacy_mode_tuning import CrossValidatorTestsMixin
 
+    @unittest.skipIf(
+        not should_test_connect or not have_torch or is_remote_only(),
+        connect_requirement_message
+        or torch_requirement_message
+        or "Requires PySpark core library in Spark Connect server",
+    )
+    class CrossValidatorTestsOnConnect(CrossValidatorTestsMixin, ReusedConnectTestCase):
+        @classmethod
+        def conf(cls):
+            config = super().conf()
+            config.set("spark.sql.artifact.copyFromLocalToFs.allowDestLocal", "true")
+            return config
 
-@unittest.skipIf(not should_test_connect, connect_requirement_message)
-class CrossValidatorTestsOnConnect(CrossValidatorTestsMixin, unittest.TestCase):
-    def setUp(self) -> None:
-        self.spark = (
-            SparkSession.builder.remote("local[2]")
-            .config("spark.sql.artifact.copyFromLocalToFs.allowDestLocal", "true")
-            .getOrCreate()
-        )
-
-    def tearDown(self) -> None:
-        self.spark.stop()
+        @classmethod
+        def master(cls):
+            return os.environ.get("SPARK_CONNECT_TESTING_REMOTE", "local[2]")
 
 
 if __name__ == "__main__":

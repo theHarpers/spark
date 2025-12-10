@@ -25,7 +25,7 @@ import org.apache.spark.sql.catalyst.catalog.{BucketSpec, ClusterBySpec}
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
 import org.apache.spark.sql.catalyst.parser.CatalystSqlParser
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
-import org.apache.spark.sql.catalyst.util.{quoteIfNeeded, QuotingUtils}
+import org.apache.spark.sql.catalyst.util.{quoteIfNeeded, quoteNameParts, QuotingUtils}
 import org.apache.spark.sql.connector.expressions.{BucketTransform, ClusterByTransform, FieldReference, IdentityTransform, LogicalExpressions, Transform}
 import org.apache.spark.sql.errors.{QueryCompilationErrors, QueryExecutionErrors}
 import org.apache.spark.sql.types.StructType
@@ -105,14 +105,14 @@ private[sql] object CatalogV2Implicits {
       case tableCatalog: TableCatalog =>
         tableCatalog
       case _ =>
-        throw QueryCompilationErrors.missingCatalogAbilityError(plugin, "tables")
+        throw QueryCompilationErrors.missingCatalogTablesAbilityError(plugin)
     }
 
     def asNamespaceCatalog: SupportsNamespaces = plugin match {
       case namespaceCatalog: SupportsNamespaces =>
         namespaceCatalog
       case _ =>
-        throw QueryCompilationErrors.missingCatalogAbilityError(plugin, "namespaces")
+        throw QueryCompilationErrors.missingCatalogNamespacesAbilityError(plugin)
     }
 
     def isFunctionCatalog: Boolean = plugin match {
@@ -124,7 +124,14 @@ private[sql] object CatalogV2Implicits {
       case functionCatalog: FunctionCatalog =>
         functionCatalog
       case _ =>
-        throw QueryCompilationErrors.missingCatalogAbilityError(plugin, "functions")
+        throw QueryCompilationErrors.missingCatalogFunctionsAbilityError(plugin)
+    }
+
+    def asProcedureCatalog: ProcedureCatalog = plugin match {
+        case procedureCatalog: ProcedureCatalog =>
+          procedureCatalog
+        case _ =>
+          throw QueryCompilationErrors.missingCatalogProceduresAbilityError(plugin)
     }
   }
 
@@ -164,6 +171,26 @@ private[sql] object CatalogV2Implicits {
       case _ => throw QueryCompilationErrors.identifierTooManyNamePartsError(original)
     }
 
+    /**
+     * Tries to convert catalog identifier to the table identifier. Table identifier does not
+     * support multiple namespaces (nested namespaces), so if identifier contains nested namespace,
+     * conversion cannot be done
+     * @param catalogName Catalog name. Identifier represents just one object in catalog, so it has
+     *                    no catalog name needed for table identifier creation
+     * @return Table identifier if conversion can be done, None otherwise
+     */
+    def asTableIdentifierOpt(catalogName: Option[String]): Option[TableIdentifier] = {
+      ident.namespace().toImmutableArraySeq match {
+        case Seq(singleNamespace) =>
+          Some(TableIdentifier(ident.name(), Some(singleNamespace), catalogName))
+        case Seq() =>
+          // If namespace is not given, catalog will not be used
+          Some(TableIdentifier(ident.name()))
+        case _ =>
+          None
+      }
+    }
+
     def asFunctionIdentifier: FunctionIdentifier = ident.namespace() match {
       case ns if ns.isEmpty => FunctionIdentifier(ident.name())
       case Array(dbName) => FunctionIdentifier(ident.name(), Some(dbName))
@@ -195,6 +222,8 @@ private[sql] object CatalogV2Implicits {
     }
 
     def quoted: String = parts.map(quoteIfNeeded).mkString(".")
+
+    def fullyQuoted: String = quoteNameParts(parts)
 
     def original: String = parts.mkString(".")
   }

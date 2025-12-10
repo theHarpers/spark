@@ -27,6 +27,7 @@ package org.apache.spark.launcher;
 public class JavaModuleOptions {
     private static final String[] DEFAULT_MODULE_OPTIONS = {
       "-XX:+IgnoreUnrecognizedVMOptions",
+      "--add-modules=jdk.incubator.vector",
       "--add-opens=java.base/java.lang=ALL-UNNAMED",
       "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED",
       "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED",
@@ -43,7 +44,10 @@ public class JavaModuleOptions {
       "--add-opens=java.base/sun.util.calendar=ALL-UNNAMED",
       "--add-opens=java.security.jgss/sun.security.krb5=ALL-UNNAMED",
       "-Djdk.reflect.useDirectMethodHandle=false",
-      "-Dio.netty.tryReflectionSetAccessible=true"};
+      "-Dio.netty.tryReflectionSetAccessible=true",
+      "-Dio.netty.allocator.type=pooled",
+      "-Dio.netty.handler.ssl.defaultEndpointVerificationAlgorithm=NONE",
+      "--enable-native-access=ALL-UNNAMED"};
 
     /**
      * Returns the default JVM runtime options used by Spark.

@@ -35,11 +35,13 @@ import org.apache.spark.util.Utils
 
 class BasicDriverFeatureStepSuite extends SparkFunSuite {
 
-  private val CUSTOM_DRIVER_LABELS = Map("labelkey" -> "labelvalue")
+  private val CUSTOM_DRIVER_LABELS = Map(
+    "labelkey" -> "labelvalue",
+    "customAppIdLabelKey" -> "{{APP_ID}}")
   private val CONTAINER_IMAGE_PULL_POLICY = "IfNotPresent"
   private val DRIVER_ANNOTATIONS = Map(
     "customAnnotation" -> "customAnnotationValue",
-    "yunikorn.apache.org/app-id" -> "{{APPID}}")
+    "customAppIdAnnotation" -> "{{APP_ID}}")
   private val DRIVER_ENVS = Map(
     "customDriverEnv1" -> "customDriverEnv1Value",
     "customDriverEnv2" -> "customDriverEnv2Value")
@@ -82,7 +84,8 @@ class BasicDriverFeatureStepSuite extends SparkFunSuite {
     val expectedPortNames = Set(
       containerPort(DRIVER_PORT_NAME, DEFAULT_DRIVER_PORT),
       containerPort(BLOCK_MANAGER_PORT_NAME, DEFAULT_BLOCKMANAGER_PORT),
-      containerPort(UI_PORT_NAME, UI_PORT.defaultValue.get)
+      containerPort(UI_PORT_NAME, UI_PORT.defaultValue.get),
+      containerPort(SPARK_CONNECT_SERVER_PORT_NAME, DEFAULT_SPARK_CONNECT_SERVER_PORT)
     )
     val foundPortNames = configuredPod.container.getPorts.asScala.toSet
     assert(expectedPortNames === foundPortNames)
@@ -121,10 +124,11 @@ class BasicDriverFeatureStepSuite extends SparkFunSuite {
     assert(driverPodMetadata.getName === "spark-driver-pod")
 
     // Check custom and preset labels are as expected
+    val labels = driverPodMetadata.getLabels
     CUSTOM_DRIVER_LABELS.foreach { case (k, v) =>
-      assert(driverPodMetadata.getLabels.get(k) === v)
+      assert(labels.get(k) === Utils.substituteAppNExecIds(v, KubernetesTestConf.APP_ID, ""))
     }
-    assert(driverPodMetadata.getLabels === kubernetesConf.labels.asJava)
+    assert(labels === kubernetesConf.labels.asJava)
 
     val annotations = driverPodMetadata.getAnnotations.asScala
     DRIVER_ANNOTATIONS.foreach { case (k, v) =>

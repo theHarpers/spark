@@ -18,6 +18,7 @@
 package org.apache.spark.sql.execution.vectorized
 
 import org.apache.spark.SparkFunSuite
+import org.apache.spark.sql.YearUDT
 import org.apache.spark.sql.catalyst.expressions.SpecificInternalRow
 import org.apache.spark.sql.catalyst.plans.SQLHelper
 import org.apache.spark.sql.execution.columnar.{ColumnAccessor, ColumnDictionary}
@@ -25,7 +26,7 @@ import org.apache.spark.sql.execution.columnar.compression.ColumnBuilderHelper
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.vectorized.ColumnarArray
-import org.apache.spark.unsafe.types.UTF8String
+import org.apache.spark.unsafe.types.{UTF8String, VariantVal}
 import org.apache.spark.util.ArrayImplicits._
 
 class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
@@ -165,6 +166,43 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
     }
   }
 
+  testVectors("variant", 3, new StructType().add("v", VariantType)) { structVector =>
+    val variantCol = structVector.getChild(0)
+    val valueChild = variantCol.getChild(0)
+    val metadataChild = variantCol.getChild(1)
+
+    variantCol.putNotNull(0)
+    valueChild.appendByteArray(Array[Byte](1, 2, 3), 0, 3)
+    metadataChild.appendByteArray(Array[Byte](10, 11), 0, 2)
+
+    variantCol.putNotNull(1)
+    valueChild.appendByteArray(Array[Byte](4, 5), 0, 2)
+    metadataChild.appendByteArray(Array[Byte](12, 13, 14), 0, 3)
+
+    variantCol.putNull(2)
+    valueChild.appendNull()
+    metadataChild.appendNull()
+
+    (0 until 3).foreach { i =>
+      val row = structVector.getStruct(i)
+      val rowCopy = row.copy()
+
+      if (i < 2) {
+        assert(!row.isNullAt(0))
+        assert(!rowCopy.isNullAt(0))
+
+        val originalVariant = row.get(0, VariantType).asInstanceOf[VariantVal]
+        val copiedVariant = rowCopy.get(0, VariantType).asInstanceOf[VariantVal]
+
+        assert(java.util.Arrays.equals(originalVariant.getValue, copiedVariant.getValue))
+        assert(java.util.Arrays.equals(originalVariant.getMetadata, copiedVariant.getMetadata))
+      } else {
+        assert(row.isNullAt(0))
+        assert(rowCopy.isNullAt(0))
+      }
+    }
+  }
+
   testVectors("float", 10, FloatType) { testVector =>
     (0 until 10).foreach { i =>
       testVector.appendFloat(i.toFloat)
@@ -271,6 +309,19 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
     (0 until 10).foreach { i =>
       mutableRow.rowId = i
       assert(mutableRow.getInt(0) === (10 - i))
+    }
+  }
+
+  testVectors("mutable ColumnarRow with TimestampNTZType", 10, TimestampNTZType) { testVector =>
+    val mutableRow = new MutableColumnarRow(Array(testVector))
+    (0 until 10).foreach { i =>
+      mutableRow.rowId = i
+      mutableRow.setLong(0, 10 - i)
+    }
+    (0 until 10).foreach { i =>
+      mutableRow.rowId = i
+      assert(mutableRow.get(0, TimestampNTZType) === (10 - i))
+      assert(mutableRow.copy().get(0, TimestampNTZType) === (10 - i))
     }
   }
 
@@ -384,18 +435,24 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
   }
 
   val structType: StructType = new StructType().add("int", IntegerType).add("double", DoubleType)
+    .add("ts", TimestampNTZType)
   testVectors("struct", 10, structType) { testVector =>
     val c1 = testVector.getChild(0)
     val c2 = testVector.getChild(1)
+    val c3 = testVector.getChild(2)
     c1.putInt(0, 123)
     c2.putDouble(0, 3.45)
+    c3.putLong(0, 1000L)
     c1.putInt(1, 456)
     c2.putDouble(1, 5.67)
+    c3.putLong(1, 2000L)
 
     assert(testVector.getStruct(0).get(0, IntegerType) === 123)
     assert(testVector.getStruct(0).get(1, DoubleType) === 3.45)
+    assert(testVector.getStruct(0).get(2, TimestampNTZType) === 1000L)
     assert(testVector.getStruct(1).get(0, IntegerType) === 456)
     assert(testVector.getStruct(1).get(1, DoubleType) === 5.67)
+    assert(testVector.getStruct(1).get(2, TimestampNTZType) === 2000L)
   }
 
   testVectors("SPARK-44805: getInts with dictionary", 3, IntegerType) { testVector =>
@@ -474,6 +531,186 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
     assert(testVector.getDoubles(0, 3)(0) == 1342.17727d)
     assert(testVector.getDoubles(0, 3)(1) == 1342.17728d)
     assert(testVector.getDoubles(0, 3)(2) == 1342.17729d)
+  }
+
+  def check(expected: Seq[Any], testVector: WritableColumnVector): Unit = {
+    expected.zipWithIndex.foreach {
+      case (v: Integer, idx) =>
+        assert(testVector.getInt(idx) == v)
+        assert(testVector.getInts(0, testVector.capacity)(idx) == v)
+      case (v: Short, idx) =>
+        assert(testVector.getShort(idx) == v)
+        assert(testVector.getShorts(0, testVector.capacity)(idx) == v)
+      case (v: Byte, idx) =>
+        assert(testVector.getByte(idx) == v)
+        assert(testVector.getBytes(0, testVector.capacity)(idx) == v)
+      case (v: Long, idx) =>
+        assert(testVector.getLong(idx) == v)
+        assert(testVector.getLongs(0, testVector.capacity)(idx) == v)
+      case (v: Float, idx) =>
+        assert(testVector.getFloat(idx) == v)
+        assert(testVector.getFloats(0, testVector.capacity)(idx) == v)
+      case (v: Double, idx) =>
+        assert(testVector.getDouble(idx) == v)
+        assert(testVector.getDoubles(0, testVector.capacity)(idx) == v)
+      case (null, idx) => testVector.isNullAt(idx)
+      case (_, idx) => assert(false, s"Unexpected value at $idx")
+    }
+
+    // Verify ColumnarArray.copy() works as expected
+    val arr = new ColumnarArray(testVector, 0, testVector.capacity)
+    assert(arr.toSeq(testVector.dataType) == expected)
+    assert(arr.copy().toSeq(testVector.dataType) == expected)
+
+    if (expected.nonEmpty) {
+      val withOffset = new ColumnarArray(testVector, 1, testVector.capacity - 1)
+      assert(withOffset.toSeq(testVector.dataType) == expected.tail)
+      assert(withOffset.copy().toSeq(testVector.dataType) == expected.tail)
+    }
+  }
+
+  testVectors("getInts with dictionary and nulls", 3, IntegerType) { testVector =>
+    // Validate without dictionary
+    val expected = Seq(1, null, 3)
+    expected.foreach {
+      case i: Integer => testVector.appendInt(i)
+      case _ => testVector.appendNull()
+    }
+    check(expected, testVector)
+
+    // Validate with dictionary
+    val expectedDictionary = Seq(7, null, 9)
+    val dictArray = (Seq(-1, -1) ++ expectedDictionary.map {
+      case i: Integer => i.toInt
+      case _ => -1
+    }).toArray
+    val dict = new ColumnDictionary(dictArray)
+    testVector.setDictionary(dict)
+    testVector.reserveDictionaryIds(3)
+    testVector.getDictionaryIds.putInt(0, 2)
+    testVector.getDictionaryIds.putInt(1, -1) // This is a null, so the entry should be ignored
+    testVector.getDictionaryIds.putInt(2, 4)
+    check(expectedDictionary, testVector)
+  }
+
+  testVectors("getShorts with dictionary and nulls", 3, ShortType) { testVector =>
+    // Validate without dictionary
+    val expected = Seq(1.toShort, null, 3.toShort)
+    expected.foreach {
+      case i: Short => testVector.appendShort(i)
+      case _ => testVector.appendNull()
+    }
+    check(expected, testVector)
+
+    // Validate with dictionary
+    val expectedDictionary = Seq(7.toShort, null, 9.toShort)
+    val dictArray = (Seq(-1, -1) ++ expectedDictionary.map {
+      case i: Short => i.toInt
+      case _ => -1
+    }).toArray
+    val dict = new ColumnDictionary(dictArray)
+    testVector.setDictionary(dict)
+    testVector.reserveDictionaryIds(3)
+    testVector.getDictionaryIds.putInt(0, 2)
+    testVector.getDictionaryIds.putInt(1, -1) // This is a null, so the entry should be ignored
+    testVector.getDictionaryIds.putInt(2, 4)
+    check(expectedDictionary, testVector)
+  }
+
+  testVectors("getBytes with dictionary and nulls", 3, ByteType) { testVector =>
+    // Validate without dictionary
+    val expected = Seq(1.toByte, null, 3.toByte)
+    expected.foreach {
+      case i: Byte => testVector.appendByte(i)
+      case _ => testVector.appendNull()
+    }
+    check(expected, testVector)
+
+    // Validate with dictionary
+    val expectedDictionary = Seq(7.toByte, null, 9.toByte)
+    val dictArray = (Seq(-1, -1) ++ expectedDictionary.map {
+      case i: Byte => i.toInt
+      case _ => -1
+    }).toArray
+    val dict = new ColumnDictionary(dictArray)
+    testVector.setDictionary(dict)
+    testVector.reserveDictionaryIds(3)
+    testVector.getDictionaryIds.putInt(0, 2)
+    testVector.getDictionaryIds.putInt(1, -1) // This is a null, so the entry should be ignored
+    testVector.getDictionaryIds.putInt(2, 4)
+    check(expectedDictionary, testVector)
+  }
+
+  testVectors("getLongs with dictionary and nulls", 3, LongType) { testVector =>
+    // Validate without dictionary
+    val expected = Seq(2147483L, null, 2147485L)
+    expected.foreach {
+      case i: Long => testVector.appendLong(i)
+      case _ => testVector.appendNull()
+    }
+    check(expected, testVector)
+
+    // Validate with dictionary
+    val expectedDictionary = Seq(2147483648L, null, 2147483650L)
+    val dictArray = (Seq(-1L, -1L) ++ expectedDictionary.map {
+      case i: Long => i
+      case _ => -1L
+    }).toArray
+    val dict = new ColumnDictionary(dictArray)
+    testVector.setDictionary(dict)
+    testVector.reserveDictionaryIds(3)
+    testVector.getDictionaryIds.putInt(0, 2)
+    testVector.getDictionaryIds.putInt(1, -1) // This is a null, so the entry should be ignored
+    testVector.getDictionaryIds.putInt(2, 4)
+    check(expectedDictionary, testVector)
+  }
+
+  testVectors("getFloats with dictionary and nulls", 3, FloatType) { testVector =>
+    // Validate without dictionary
+    val expected = Seq(1.1f, null, 3.3f)
+    expected.foreach {
+      case i: Float => testVector.appendFloat(i)
+      case _ => testVector.appendNull()
+    }
+    check(expected, testVector)
+
+    // Validate with dictionary
+    val expectedDictionary = Seq(0.1f, null, 0.3f)
+    val dictArray = (Seq(-1f, -1f) ++ expectedDictionary.map {
+      case i: Float => i
+      case _ => -1f
+    }).toArray
+    val dict = new ColumnDictionary(dictArray)
+    testVector.setDictionary(dict)
+    testVector.reserveDictionaryIds(3)
+    testVector.getDictionaryIds.putInt(0, 2)
+    testVector.getDictionaryIds.putInt(1, -1) // This is a null, so the entry should be ignored
+    testVector.getDictionaryIds.putInt(2, 4)
+    check(expectedDictionary, testVector)
+  }
+
+  testVectors("getDoubles with dictionary and nulls", 3, DoubleType) { testVector =>
+    // Validate without dictionary
+    val expected = Seq(1.1d, null, 3.3d)
+    expected.foreach {
+      case i: Double => testVector.appendDouble(i)
+      case _ => testVector.appendNull()
+    }
+    check(expected, testVector)
+
+    // Validate with dictionary
+    val expectedDictionary = Seq(1342.17727d, null, 1342.17729d)
+    val dictArray = (Seq(-1d, -1d) ++ expectedDictionary.map {
+      case i: Double => i
+      case _ => -1d
+    }).toArray
+    val dict = new ColumnDictionary(dictArray)
+    testVector.setDictionary(dict)
+    testVector.reserveDictionaryIds(3)
+    testVector.getDictionaryIds.putInt(0, 2)
+    testVector.getDictionaryIds.putInt(1, -1) // This is a null, so the entry should be ignored
+    testVector.getDictionaryIds.putInt(2, 4)
+    check(expectedDictionary, testVector)
   }
 
   test("[SPARK-22092] off-heap column vector reallocation corrupts array data") {
@@ -727,5 +964,50 @@ class ColumnVectorSuite extends SparkFunSuite with SQLHelper {
       }
     }
   }
-}
 
+  val yearUDT = new YearUDT
+  testVectors("user defined type", 10, yearUDT) { testVector =>
+    assert(testVector.dataType() === IntegerType)
+    (0 until 10).foreach { i =>
+      testVector.appendInt(i)
+    }
+  }
+
+  testVectors("user defined type in map type",
+    10, MapType(IntegerType, yearUDT)) { testVector =>
+    assert(testVector.dataType() === MapType(IntegerType, IntegerType))
+  }
+
+  testVectors("user defined type in array type",
+    10, ArrayType(yearUDT, containsNull = true)) { testVector =>
+    assert(testVector.dataType() === ArrayType(IntegerType, containsNull = true))
+  }
+
+  testVectors("user defined type in struct type",
+    10, StructType(Seq(StructField("year", yearUDT)))) { testVector =>
+    assert(testVector.dataType() === StructType(Seq(StructField("year", IntegerType))))
+  }
+
+  testVectors("SPARK-53434: ColumnarRow.get() should handle null", 1, structType) { testVector =>
+    val c1 = testVector.getChild(0)
+    val c2 = testVector.getChild(1)
+    val c3 = testVector.getChild(2)
+
+    // For row 0, set the integer field to null, and other fields to non-null.
+    c1.putNull(0)
+    c2.putDouble(0, 3.45)
+    c3.putLong(0, 1000L)
+
+    val row = testVector.getStruct(0)
+
+    // Verify that get() on the null field returns null.
+    assert(row.isNullAt(0))
+    assert(row.get(0, IntegerType) == null)
+
+    // Verify that other fields can be retrieved correctly.
+    assert(!row.isNullAt(1))
+    assert(row.get(1, DoubleType) === 3.45)
+    assert(!row.isNullAt(2))
+    assert(row.get(2, TimestampNTZType) === 1000L)
+  }
+}

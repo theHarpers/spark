@@ -22,7 +22,7 @@ from typing import Union, TYPE_CHECKING
 
 from pyspark.errors import PySparkTypeError
 from pyspark.sql import functions as pysparkfuncs
-from pyspark.sql.connect.column import Column
+from pyspark.sql.column import Column
 from pyspark.sql.connect.functions.builtin import _to_col, _invoke_function_over_columns
 from pyspark.sql.connect.functions.builtin import lit, _invoke_function
 
@@ -38,8 +38,8 @@ def bucket(numBuckets: Union[Column, int], col: "ColumnOrName") -> Column:
         _numBuckets = numBuckets
     else:
         raise PySparkTypeError(
-            error_class="NOT_COLUMN_OR_INT",
-            message_parameters={
+            errorClass="NOT_COLUMN_OR_INT",
+            messageParameters={
                 "arg_name": "numBuckets",
                 "arg_type": type(numBuckets).__name__,
             },

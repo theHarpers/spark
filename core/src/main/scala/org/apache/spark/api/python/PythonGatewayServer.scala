@@ -23,8 +23,8 @@ import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.Files
 
 import org.apache.spark.SparkConf
-import org.apache.spark.internal.{Logging, MDC}
-import org.apache.spark.internal.LogKey.{CLASS_NAME, PATH}
+import org.apache.spark.internal.Logging
+import org.apache.spark.internal.LogKeys.{CLASS_NAME, PATH}
 
 /**
  * Process that starts a Py4J server on an ephemeral port.
